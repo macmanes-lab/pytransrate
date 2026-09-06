@@ -104,11 +104,42 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-seed-hits",
         type=int,
-        default=300000,
+        default=4000,
         help=(
-            "snap-aligner paired -H (default 300000, as the Ruby used; "
-            "snap's own default is 4000). Drives the scoring candidate pool "
-            "allocation -- lower it if snap crashes or exhausts memory"
+            "snap-aligner paired -H (default 4000, snap's own default; the "
+            "Ruby used 300000). Sizes the scoring candidate pool"
+        ),
+    )
+    parser.add_argument(
+        "--extra-search-depth",
+        type=int,
+        default=2,
+        help="snap-aligner paired -D (default 2). Must be >= --multi-edit-distance",
+    )
+    parser.add_argument(
+        "--multi-edit-distance",
+        type=int,
+        default=2,
+        help=(
+            "snap-aligner paired -om (default 2): extra edit distance admitted "
+            "for secondary alignments. Higher values explode on a redundant "
+            "assembly for almost no extra multi-mapping signal"
+        ),
+    )
+    parser.add_argument(
+        "--max-alignments-per-pair",
+        type=int,
+        default=10,
+        help="snap-aligner paired -omax, cap on alignments per pair (default 10)",
+    )
+    parser.add_argument(
+        "--max-alignments-per-contig",
+        type=int,
+        default=1,
+        help=(
+            "snap-aligner paired -mpc (default 1), applied before -omax: the "
+            "best placement per candidate contig, which is what fragment "
+            "assignment consumes. 0 disables the cap"
         ),
     )
     parser.add_argument(
@@ -223,6 +254,14 @@ def analyse_assembly(assembly_path, args, result_dir: Path) -> dict:
         left, right, threads=args.threads,
         max_seed_hits=args.max_seed_hits,
         edit_distance=args.edit_distance,
+        extra_search_depth=args.extra_search_depth,
+        multi_edit_distance=args.multi_edit_distance,
+        max_alignments_per_pair=args.max_alignments_per_pair,
+        max_alignments_per_contig=(
+            args.max_alignments_per_contig
+            if args.max_alignments_per_contig > 0
+            else None
+        ),
         max_candidate_pool=args.max_candidate_pool,
     )
     logger.info("%d fragments in library", snap.read_count)

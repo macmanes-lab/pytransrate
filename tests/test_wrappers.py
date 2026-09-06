@@ -80,15 +80,15 @@ def snap():
     return obj
 
 
-def test_paired_command_keeps_the_ruby_flags(snap):
+def test_paired_command_keeps_the_ruby_flag_set(snap):
+    """The same flags as the Ruby; several values differ, see
+    MULTI_ALIGNMENT_SETTINGS."""
     args = [str(a) for a in snap.build_paired_command("l.fq", "r.fq", 8, "o.bam")]
     joined = " ".join(args)
-    # Every flag the Ruby passed, all verified present in snap-aligner 2.0.5.
     for flag in ["-s", "-H", "-h", "-d", "-t", "-b", "-M", "-D", "-om",
                  "-omax", "-o"]:
         assert flag in args, flag
     assert "-s 0 1000" in joined
-    assert "-om 5" in joined and "-omax 10" in joined
     assert args[:3] == ["snap-aligner", "paired", "assembly"]
 
 
@@ -507,10 +507,118 @@ def test_seed_hits_and_edit_distance_are_tunable(snap):
     assert args[args.index("-d") + 1] == "20"
 
 
-def test_paired_defaults_match_the_ruby(snap):
+def test_paired_defaults_are_the_validated_configuration(snap):
+    """MULTI_ALIGNMENT_SETTINGS: the flags that run on real ORP data."""
     args = [str(a) for a in snap.build_paired_command("l.fq", "r.fq", 8, "o.bam")]
-    assert args[args.index("-H") + 1] == "300000"
+    assert args[args.index("-H") + 1] == "4000"
     assert args[args.index("-d") + 1] == "30"
+    assert args[args.index("-D") + 1] == "2"
+    assert args[args.index("-om") + 1] == "2"
+    assert args[args.index("-omax") + 1] == "10"
+    assert args[args.index("-mpc") + 1] == "1"
+
+
+def test_extra_search_depth_is_at_least_the_multi_edit_distance(snap):
+    """-om needs -D to search that far; the defaults must not violate it."""
+    args = [str(a) for a in snap.build_paired_command("l.fq", "r.fq", 8, "o.bam")]
+    assert int(args[args.index("-D") + 1]) >= int(args[args.index("-om") + 1])
+
+
+def test_multi_alignment_flags_are_tunable(snap):
+    args = [str(a) for a in snap.build_paired_command(
+        "l.fq", "r.fq", 8, "o.bam", extra_search_depth=5,
+        multi_edit_distance=5, max_alignments_per_pair=3)]
+    assert args[args.index("-D") + 1] == "5"
+    assert args[args.index("-om") + 1] == "5"
+    assert args[args.index("-omax") + 1] == "3"
+
+
+def test_mpc_can_be_disabled(snap):
+    args = [str(a) for a in snap.build_paired_command(
+        "l.fq", "r.fq", 8, "o.bam", max_alignments_per_contig=None)]
+    assert "-mpc" not in args
+
+
+def test_multi_alignment_is_never_silently_disabled(snap):
+    """-om is what produces the alternates the assignment step needs."""
+    args = [str(a) for a in snap.build_paired_command("l.fq", "r.fq", 8, "o.bam")]
+    assert "-om" in args
+    assert int(args[args.index("-om") + 1]) >= 1
+
+
+# ---------------------------------------------------------------------------
+# SILENT_OPTION_REJECTION
+# ---------------------------------------------------------------------------
+
+
+def _mapping_snap(tmp_path, monkeypatch, result, write_bam=True, size=10):
+    import pytransrate.mapper as mapper
+
+    def fake(args, **kwargs):
+        if write_bam:
+            out = args[args.index("-o") + 1]
+            Path(out).write_bytes(b"x" * size)
+        return result
+
+    monkeypatch.setattr(mapper, "run", fake)
+    obj = Snap.__new__(Snap)
+    obj.binary = "snap-aligner"
+    obj.index_name = "assembly"
+    obj.index_built = True
+    obj.bam = None
+    obj.read_count = 0
+    obj._read_count_file = None
+    monkeypatch.chdir(tmp_path)
+    return obj
+
+
+def test_rejected_option_raises_despite_exit_zero(tmp_path, monkeypatch):
+    """snap prints the complaint, writes nothing, and exits 0."""
+    result = _Result(True)
+    result.stdout = "Didn't understand options starting at -om 2 -omax 10\nUsage:"
+    snap = _mapping_snap(tmp_path, monkeypatch, result, write_bam=False)
+    with pytest.raises(Exception, match="rejected an option"):
+        snap.map_reads("l.fq", "r.fq")
+
+
+def test_missing_bam_raises_despite_exit_zero(tmp_path, monkeypatch):
+    snap = _mapping_snap(tmp_path, monkeypatch, _Result(True), write_bam=False)
+    with pytest.raises(Exception, match="produced no alignments"):
+        snap.map_reads("l.fq", "r.fq")
+
+
+def test_empty_bam_raises_despite_exit_zero(tmp_path, monkeypatch):
+    snap = _mapping_snap(tmp_path, monkeypatch, _Result(True), size=0)
+    with pytest.raises(Exception, match="produced no alignments"):
+        snap.map_reads("l.fq", "r.fq")
+
+
+def test_successful_mapping_returns_the_bam(tmp_path, monkeypatch):
+    snap = _mapping_snap(tmp_path, monkeypatch, _Result(True))
+    bam = snap.map_reads("l.fq", "r.fq")
+    assert Path(bam).exists()
+
+
+def test_cli_exposes_the_multi_alignment_flags():
+    from pytransrate.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["-a", "x.fa", "--extra-search-depth", "5", "--multi-edit-distance", "5",
+         "--max-alignments-per-pair", "3", "--max-alignments-per-contig", "2"]
+    )
+    assert args.extra_search_depth == 5
+    assert args.multi_edit_distance == 5
+    assert args.max_alignments_per_pair == 3
+    assert args.max_alignments_per_contig == 2
+
+
+def test_cli_multi_alignment_defaults():
+    from pytransrate.cli import build_parser
+
+    args = build_parser().parse_args(["-a", "x.fa"])
+    assert (args.max_seed_hits, args.extra_search_depth,
+            args.multi_edit_distance, args.max_alignments_per_pair,
+            args.max_alignments_per_contig) == (4000, 2, 2, 10, 1)
 
 
 def test_cli_exposes_the_paired_tunables():
@@ -525,10 +633,15 @@ def test_cli_exposes_the_paired_tunables():
     assert args.max_candidate_pool == 1_000_000
 
 
+def test_cli_default_seed_hits_is_snaps_own():
+    from pytransrate.cli import build_parser
+
+    assert build_parser().parse_args(["-a", "x.fa"]).max_seed_hits == 4000
+
+
 def test_cli_defaults_omit_mcp():
     from pytransrate.cli import build_parser
 
     args = build_parser().parse_args(["-a", "x.fa"])
     assert args.max_candidate_pool is None
-    assert args.max_seed_hits == 300000
     assert args.edit_distance == 30

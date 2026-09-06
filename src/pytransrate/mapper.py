@@ -78,13 +78,57 @@ _INDEX_MARKER = "GenomeIndex"
 # INT_MAX if you do.
 # ---------------------------------------------------------------------------
 
-#: snap's -H. The Ruby's 300000, well above snap's own default of 4000; it
-#: drives the scoring candidate pool allocation
-#: (scoringCandidatePoolSize = min(mcp, maxBigHits * maxSeeds * 2)).
-DEFAULT_MAX_SEED_HITS = 300000
+# ---------------------------------------------------------------------------
+# MULTI_ALIGNMENT_SETTINGS
+#
+# snap-aligner 2.0.5 dies with SIGFPE on a real ORP assembly under the flags
+# snap.rb used (-H 300000 -D 5 -om 5 -omax 10). Bisected on the failing data:
+# removing -mcp did not help, nor did dropping -H to 4000; removing
+# -D/-om/-omax did. So the fault is in the multiple-alignment path, reached
+# only at a scale and redundancy this project's synthetic tests do not hit --
+# 27k redundant contigs with 116k secondary alignments still aligns cleanly
+# here.
+#
+# The defaults below are the configuration that runs on that data. Two of
+# them differ from the Ruby:
+#
+#   -om 5 -> 2   "accept alignments within edit distance 5 of the best" is far
+#                wider than a redundant transcriptome needs, where duplicate
+#                contigs differ by 0-2 bases. Measured on a redundant 27k-contig
+#                assembly, tightening 5 -> 1 retained 98.6% of secondary
+#                alignments and 99.98% of fragments hitting >1 contig, so the
+#                multi-mapping signal the assignment step needs survives intact.
+#   -D 5 -> 2    extra search depth; must track -om.
+#
+# -mpc 1 is new, and is the right shape for this job independently of the
+# crash: it caps alignments per contig, applied before -omax, so a fragment
+# contributes its best placement on each candidate contig rather than several
+# placements on one. That is exactly what transrate.assign consumes.
+#
+# -H drops to snap's own default of 4000. The Ruby's 300000 was 75x that,
+# with no rationale recorded, and it sizes the scoring candidate pool
+# (scoringCandidatePoolSize = min(mcp, maxBigHits * maxSeeds * 2)).
+#
+# All are overridable; see the --max-seed-hits family in pytransrate.cli.
+# ---------------------------------------------------------------------------
+
+#: snap's -H, max hits for the intersecting aligner. snap's own default.
+DEFAULT_MAX_SEED_HITS = 4000
 
 #: snap's -d, maximum edit distance per read or pair.
 DEFAULT_EDIT_DISTANCE = 30
+
+#: snap's -D, extra search depth. Must be >= the -om value.
+DEFAULT_EXTRA_SEARCH_DEPTH = 2
+
+#: snap's -om, extra edit distance admitted for secondary alignments.
+DEFAULT_MULTI_EDIT_DISTANCE = 2
+
+#: snap's -omax, cap on secondary alignments per pair.
+DEFAULT_MAX_ALIGNMENTS_PER_PAIR = 10
+
+#: snap's -mpc, cap on alignments per contig, applied before -omax.
+DEFAULT_MAX_ALIGNMENTS_PER_CONTIG = 1
 
 _OVERFLOW_PATTERNS = (
     re.compile(r"Ran out of overflow table namespace"),
@@ -92,6 +136,18 @@ _OVERFLOW_PATTERNS = (
 )
 
 _UNMATCHED_IDS = re.compile(r"Unmatched\s+read\s+IDs\s+(.*?)\s+and\s+(.*?)Use", re.S)
+
+# ---------------------------------------------------------------------------
+# SILENT_OPTION_REJECTION
+#
+# snap-aligner prints "Didn't understand options starting at ..." followed by
+# its usage text, writes no BAM -- and exits 0. A caller that trusts the exit
+# code sees success and carries on with a path to a file that does not exist,
+# failing later and somewhere unrelated. So the mapping step checks the
+# output itself rather than the return code alone.
+# ---------------------------------------------------------------------------
+
+_BAD_OPTIONS = re.compile(r"Didn't understand options starting at (.*)")
 
 
 class Snap:
@@ -206,12 +262,16 @@ class Snap:
         output: str,
         max_seed_hits: int = DEFAULT_MAX_SEED_HITS,
         edit_distance: int = DEFAULT_EDIT_DISTANCE,
+        extra_search_depth: int = DEFAULT_EXTRA_SEARCH_DEPTH,
+        multi_edit_distance: int = DEFAULT_MULTI_EDIT_DISTANCE,
+        max_alignments_per_pair: int = DEFAULT_MAX_ALIGNMENTS_PER_PAIR,
+        max_alignments_per_contig: int | None = DEFAULT_MAX_ALIGNMENTS_PER_CONTIG,
         max_candidate_pool: int | None = None,
     ):
         """Assemble the ``snap-aligner paired`` command.
 
-        Flags match the Ruby's, all verified present in snap-aligner 2.0.5,
-        with the exception of ``-mcp`` -- see MAX_CANDIDATE_POOL.
+        See MULTI_ALIGNMENT_SETTINGS for why the -D/-om/-omax/-mpc defaults
+        differ from the Ruby's, and MAX_CANDIDATE_POOL for why -mcp is gone.
         """
         args = [self.binary, "paired", self.index_name]
         for l, r in zip(str(left).split(","), str(right).split(",")):
@@ -225,10 +285,14 @@ class Snap:
             "-t", threads,
             "-b",                 # bind threads to cores
             "-M",                 # M-style CIGAR (now the default, kept explicit)
-            "-D", 5,              # extra search depth, needed for -om
-            "-om", 5,             # report multiple alignments
-            "-omax", 10,          # cap alignments per pair
+            "-D", extra_search_depth,       # must track -om
+            "-om", multi_edit_distance,     # report multiple alignments
+            "-omax", max_alignments_per_pair,
         ]
+        if max_alignments_per_contig is not None:
+            # Applied before -omax: best placement per candidate contig,
+            # which is what the fragment assignment actually consumes.
+            args += ["-mpc", max_alignments_per_contig]
         if max_candidate_pool is not None:
             args += ["-mcp", max_candidate_pool]
         return args
@@ -241,6 +305,10 @@ class Snap:
         output=None,
         max_seed_hits: int = DEFAULT_MAX_SEED_HITS,
         edit_distance: int = DEFAULT_EDIT_DISTANCE,
+        extra_search_depth: int = DEFAULT_EXTRA_SEARCH_DEPTH,
+        multi_edit_distance: int = DEFAULT_MULTI_EDIT_DISTANCE,
+        max_alignments_per_pair: int = DEFAULT_MAX_ALIGNMENTS_PER_PAIR,
+        max_alignments_per_contig: int | None = DEFAULT_MAX_ALIGNMENTS_PER_CONTIG,
         max_candidate_pool: int | None = None,
     ) -> str:
         """Map paired reads, returning the path to the BAM.
@@ -267,11 +335,25 @@ class Snap:
             left, right, threads, self.bam,
             max_seed_hits=max_seed_hits,
             edit_distance=edit_distance,
+            extra_search_depth=extra_search_depth,
+            multi_edit_distance=multi_edit_distance,
+            max_alignments_per_pair=max_alignments_per_pair,
+            max_alignments_per_contig=max_alignments_per_contig,
             max_candidate_pool=max_candidate_pool,
         )
         result = run(args)
         self._save_read_count(result.stdout)
         self._save_logs(result.stdout, result.stderr)
+
+        # SILENT_OPTION_REJECTION: check this before the exit code, because
+        # snap returns 0 in this case.
+        bad_options = _BAD_OPTIONS.search(result.stdout + result.stderr)
+        if bad_options:
+            raise SnapError(
+                "snap-aligner rejected an option and produced no alignments: "
+                f"{bad_options.group(1).strip()}\n"
+                f"command: {' '.join(str(a) for a in args)}"
+            )
 
         if not result.ok:
             match = _UNMATCHED_IDS.search(result.stderr)
@@ -283,6 +365,14 @@ class Snap:
                     "at the same position in the file."
                 )
             raise SnapError(f"snap failed\n{result.stderr}")
+
+        # snap can exit 0 having written nothing; see SILENT_OPTION_REJECTION.
+        if not os.path.exists(self.bam) or os.path.getsize(self.bam) == 0:
+            raise SnapError(
+                f"snap-aligner exited successfully but produced no alignments "
+                f"at {self.bam}\ncommand: "
+                f"{' '.join(str(a) for a in args)}\n{result.stderr}"
+            )
 
         return self.bam
 
