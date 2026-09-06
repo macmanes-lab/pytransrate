@@ -1,0 +1,290 @@
+"""Tests for the external-tool wrappers and the CLI.
+
+Command construction is asserted directly rather than by running the tools,
+so these pass without snap-aligner or salmon installed. The end-to-end run
+against the real binaries lives in tests/test_pipeline.py.
+"""
+
+from __future__ import annotations
+
+import gzip
+
+import pytest
+
+from transrate.cmd import CommandError, CommandResult, run, which
+from transrate.mapper import Snap
+from transrate.quantify import Salmon, SalmonError, load_expression
+from transrate.read_metrics import get_read_length
+
+
+# ---------------------------------------------------------------------------
+# cmd
+# ---------------------------------------------------------------------------
+
+
+def test_run_captures_stdout():
+    result = run(["echo", "hello"])
+    assert result.ok
+    assert result.stdout.strip() == "hello"
+
+
+def test_run_coerces_arguments_to_strings():
+    result = run(["echo", 42])
+    assert result.stdout.strip() == "42"
+
+
+def test_run_reports_failure_without_raising():
+    result = run(["false"])
+    assert not result.ok
+    with pytest.raises(CommandError):
+        result.check()
+
+
+def test_run_does_not_use_a_shell():
+    """Arguments are passed through, not interpreted."""
+    result = run(["echo", "$HOME; rm -rf /"])
+    assert "$HOME" in result.stdout
+
+
+def test_run_writes_stdout_to_a_file(tmp_path):
+    out = tmp_path / "o.txt"
+    result = run(["echo", "written"], stdout_path=str(out))
+    assert result.ok
+    assert out.read_text().strip() == "written"
+
+
+def test_which_raises_for_a_missing_binary():
+    with pytest.raises(CommandError, match="could not find"):
+        which("definitely-not-a-real-binary-xyz")
+
+
+def test_command_result_str_is_the_command():
+    assert str(CommandResult(args=["a", "b"], returncode=0)) == "a b"
+
+
+# ---------------------------------------------------------------------------
+# snap-aligner command construction
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def snap():
+    obj = Snap.__new__(Snap)          # bypass the PATH lookup
+    obj.binary = "snap-aligner"
+    obj.index_name = "assembly"
+    obj.index_built = True
+    obj.bam = None
+    obj.read_count = 0
+    obj._read_count_file = None
+    return obj
+
+
+def test_paired_command_keeps_the_ruby_flags(snap):
+    args = [str(a) for a in snap.build_paired_command("l.fq", "r.fq", 8, "o.bam")]
+    joined = " ".join(args)
+    # Every flag the Ruby passed, all verified present in snap-aligner 2.0.5.
+    for flag in ["-s", "-H", "-h", "-d", "-t", "-b", "-M", "-D", "-om",
+                 "-omax", "-mcp", "-o"]:
+        assert flag in args, flag
+    assert "-s 0 1000" in joined
+    assert "-om 5" in joined and "-omax 10" in joined
+    assert args[:3] == ["snap-aligner", "paired", "assembly"]
+
+
+def test_paired_command_interleaves_multiple_read_files(snap):
+    args = [str(a) for a in
+            snap.build_paired_command("a.fq,b.fq", "x.fq,y.fq", 4, "o.bam")]
+    idx = args.index("a.fq")
+    assert args[idx:idx + 4] == ["a.fq", "x.fq", "b.fq", "y.fq"]
+
+
+def test_map_reads_requires_an_index(snap):
+    snap.index_built = False
+    with pytest.raises(Exception, match="Index not built"):
+        snap.map_reads("l.fq", "r.fq")
+
+
+def test_read_count_is_halved_from_snaps_summary(snap):
+    snap._read_count_file = None
+    snap._save_read_count(
+        "Total Reads    Aligned    Unaligned   x   y   z\n"
+        "1,000          900        100         1   2   3\n"
+    )
+    assert snap.read_count == 500
+
+
+# ---------------------------------------------------------------------------
+# salmon command construction and quant.sf parsing
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def salmon():
+    obj = Salmon.__new__(Salmon)
+    obj.binary = "salmon"
+    return obj
+
+
+def test_salmon_command_uses_modern_flags(salmon):
+    args = [str(a) for a in salmon.build_command("a.fa", "in.bam", 8, "out")]
+    joined = " ".join(args)
+    assert "--alignments in.bam" in joined
+    assert "--targets a.fa" in joined
+    assert "--libType A" in joined
+    assert "--errorModel" in args
+
+
+def test_salmon_command_omits_removed_flags(salmon):
+    """--useErrorModel is a hard error in salmon 2.x; --sampleOut is inert."""
+    args = [str(a) for a in salmon.build_command("a.fa", "in.bam", 8, "out")]
+    assert "--useErrorModel" not in args
+    assert "--sampleOut" not in args
+    assert "--sampleUnaligned" not in args
+
+
+def test_salmon_error_model_can_be_disabled(salmon):
+    args = [str(a) for a in
+            salmon.build_command("a.fa", "in.bam", 8, "out", error_model=False)]
+    assert "--errorModel" not in args
+
+
+def _quant(tmp_path, rows):
+    path = tmp_path / "quant.sf"
+    path.write_text(
+        "Name\tLength\tEffectiveLength\tTPM\tNumReads\n"
+        + "".join("\t".join(str(c) for c in r) + "\n" for r in rows)
+    )
+    return path
+
+
+def test_load_expression_parses_quant_sf(tmp_path):
+    path = _quant(tmp_path, [["tx0", 1000, 850.5, 123.4, 42.7]])
+    expression = load_expression(path)
+    assert expression["tx0"]["eff_len"] == 850     # truncated, as in the Ruby
+    assert expression["tx0"]["tpm"] == pytest.approx(123.4)
+    assert expression["tx0"]["eff_count"] == pytest.approx(42.7)
+
+
+def test_load_expression_rejects_the_wrong_column_count(tmp_path):
+    path = tmp_path / "quant.sf"
+    path.write_text("Name\tLength\tTPM\n" + "tx0\t100\t1.0\n")
+    with pytest.raises(SalmonError, match="5 columns"):
+        load_expression(path)
+
+
+def test_load_expression_on_an_empty_table(tmp_path):
+    assert load_expression(_quant(tmp_path, [])) == {}
+
+
+# ---------------------------------------------------------------------------
+# read length
+# ---------------------------------------------------------------------------
+
+
+def test_get_read_length_takes_the_maximum(tmp_path):
+    fq = tmp_path / "r.fq"
+    fq.write_text(
+        "@a\n" + "A" * 75 + "\n+\n" + "I" * 75 + "\n"
+        "@b\n" + "A" * 100 + "\n+\n" + "I" * 100 + "\n"
+    )
+    assert get_read_length(str(fq)) == 100
+
+
+def test_get_read_length_reads_gzip(tmp_path):
+    fq = tmp_path / "r.fq.gz"
+    with gzip.open(fq, "wt") as handle:
+        handle.write("@a\n" + "A" * 60 + "\n+\n" + "I" * 60 + "\n")
+    assert get_read_length(str(fq)) == 60
+
+
+def test_get_read_length_uses_the_first_file_only(tmp_path):
+    a = tmp_path / "a.fq"
+    a.write_text("@a\n" + "A" * 50 + "\n+\n" + "I" * 50 + "\n")
+    b = tmp_path / "b.fq"
+    b.write_text("@b\n" + "A" * 200 + "\n+\n" + "I" * 200 + "\n")
+    assert get_read_length(f"{a},{b}") == 50
+
+
+# ---------------------------------------------------------------------------
+# CLI argument validation
+# ---------------------------------------------------------------------------
+
+
+def _args(**kwargs):
+    from transrate.cli import build_parser
+
+    argv = []
+    for key, value in kwargs.items():
+        flag = "--" + key.replace("_", "-")
+        if value is True:
+            argv.append(flag)
+        elif value is not None:
+            argv += [flag, str(value)]
+    return build_parser().parse_args(argv)
+
+
+def test_reference_is_rejected_with_an_explanation(tmp_path):
+    from transrate.cli import check_arguments
+
+    fasta = tmp_path / "a.fa"
+    fasta.write_text(">c\nACGT\n")
+    args = _args(assembly=str(fasta), reference=str(fasta))
+    with pytest.raises(CommandError, match="not implemented"):
+        check_arguments(args)
+
+
+def test_missing_assembly_is_rejected():
+    from transrate.cli import check_arguments
+
+    with pytest.raises(CommandError, match="does not exist"):
+        check_arguments(_args(assembly="/nope/missing.fa"))
+
+
+def test_duplicate_assemblies_are_rejected(tmp_path):
+    from transrate.cli import check_arguments
+
+    fasta = tmp_path / "a.fa"
+    fasta.write_text(">c\nACGT\n")
+    args = _args(assembly=f"{fasta},{fasta}")
+    with pytest.raises(CommandError, match="more than once"):
+        check_arguments(args)
+
+
+def test_left_without_right_is_rejected(tmp_path):
+    from transrate.cli import check_arguments
+
+    fasta = tmp_path / "a.fa"
+    fasta.write_text(">c\nACGT\n")
+    reads = tmp_path / "r.fq"
+    reads.write_text("@a\nACGT\n+\nIIII\n")
+    args = _args(assembly=str(fasta), left=str(reads))
+    with pytest.raises(CommandError, match="together"):
+        check_arguments(args)
+
+
+def test_mismatched_read_file_counts_are_rejected(tmp_path):
+    from transrate.cli import check_arguments
+
+    fasta = tmp_path / "a.fa"
+    fasta.write_text(">c\nACGT\n")
+    r1 = tmp_path / "r1.fq"
+    r1.write_text("@a\nACGT\n+\nIIII\n")
+    args = _args(assembly=str(fasta), left=f"{r1},{r1}", right=str(r1))
+    with pytest.raises(CommandError, match="same number"):
+        check_arguments(args)
+
+
+def test_read_paths_are_absolutised(tmp_path, monkeypatch):
+    """They must resolve before the run chdirs into the output directory."""
+    from transrate.cli import check_arguments
+
+    fasta = tmp_path / "a.fa"
+    fasta.write_text(">c\nACGT\n")
+    reads = tmp_path / "r.fq"
+    reads.write_text("@a\nACGT\n+\nIIII\n")
+
+    monkeypatch.chdir(tmp_path)
+    args = _args(assembly="a.fa", left="r.fq", right="r.fq")
+    check_arguments(args)
+    assert args.left.startswith("/")
+    assert args.right.startswith("/")

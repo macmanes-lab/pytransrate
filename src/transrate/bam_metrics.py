@@ -29,6 +29,7 @@ __all__ = [
     "CSV_COLUMNS",
     "ContigMetrics",
     "estimate_realistic_distance",
+    "accumulate_metrics",
     "compute_bam_metrics",
     "write_metrics_csv",
 ]
@@ -278,92 +279,122 @@ def estimate_realistic_distance(
     return int(3 * sd + mean)
 
 
-def compute_bam_metrics(
-    bam_path: str,
+def accumulate_metrics(
+    references,
+    lengths,
+    alignments,
+    realistic_distance: int,
     nullprior: float = DEFAULT_NULL_PRIOR,
-    realistic_distance: int | None = None,
 ) -> list[ContigMetrics]:
-    """Compute per-contig metrics, one entry per reference in the BAM header.
+    """Accumulate per-contig metrics from a stream of alignments.
+
+    Takes an iterable rather than a path so that
+    :func:`transrate.assign.assign_fragments` can feed alignments straight
+    through without staging them in a file -- the round trip salmon 0.8.2's
+    ``postSample.bam`` used to force.
 
     Args:
-        bam_path: BAM carrying one alignment per fragment.
+        references: reference names, in header order.
+        lengths: reference lengths, parallel to ``references``.
+        alignments: iterable of :class:`pysam.AlignedSegment`, carrying at
+            most one alignment per fragment per reference.
+        realistic_distance: pairs further apart than this are not ``good``.
         nullprior: prior on "not segmented" passed to the segmenter.
-        realistic_distance: override the fragment-size estimate; computed from
-            the BAM when omitted.
 
     Returns:
         One :class:`ContigMetrics` per reference, in header order.
     """
-    if realistic_distance is None:
-        realistic_distance = estimate_realistic_distance(bam_path)
+    contigs = [
+        ContigMetrics(name=name, length=length)
+        for name, length in zip(references, lengths)
+    ]
 
-    with pysam.AlignmentFile(bam_path, "rb") as bam:
-        contigs = [
-            ContigMetrics(name=name, length=length)
-            for name, length in zip(bam.references, bam.lengths)
-        ]
+    for read in alignments:
+        if read.is_unmapped:
+            continue
 
-        for read in bam.fetch(until_eof=True):
-            if read.is_unmapped:
-                continue
+        refid = read.reference_id
+        contig = contigs[refid]
+        contig.reads_mapped += 1
+        contig.bases_mapped += _read_length(read)
+        contig.add_alignment(read)
 
-            refid = read.reference_id
-            contig = contigs[refid]
-            contig.reads_mapped += 1
-            contig.bases_mapped += _read_length(read)
-            contig.add_alignment(read)
+        # Rescaled per-base sequence accuracy from the edit distance.
+        # A read with NM == 35 scores 0; the C++ does not clamp, so
+        # heavily-mismatched reads contribute negative values.
+        if read.has_tag("NM"):
+            nm = read.get_tag("NM")
+            length = _read_length(read)
+            if length > 0:
+                scale = (length - 35) / length
+                seq_true = (length - nm) / length
+                if scale != 1.0:
+                    seq_true = (seq_true - scale) * (1 / (1 - scale))
+                contig.p_seq_true_sum += seq_true
 
-            # Rescaled per-base sequence accuracy from the edit distance.
-            # A read with NM == 35 scores 0; the C++ does not clamp, so
-            # heavily-mismatched reads contribute negative values.
-            if read.has_tag("NM"):
-                nm = read.get_tag("NM")
-                length = _read_length(read)
-                if length > 0:
-                    scale = (length - 35) / length
-                    seq_true = (length - nm) / length
-                    if scale != 1.0:
-                        seq_true = (seq_true - scale) * (1 / (1 - scale))
-                    contig.p_seq_true_sum += seq_true
+        is_first = read.is_read1
+        is_second = read.is_read2
+        mate_mapped = read.is_paired and not read.mate_is_unmapped
 
-            is_first = read.is_read1
-            is_second = read.is_read2
-            mate_mapped = read.is_paired and not read.mate_is_unmapped
+        if is_first or (is_second and not mate_mapped):
+            contig.fragments_mapped += 1
 
-            if is_first or (is_second and not mate_mapped):
-                contig.fragments_mapped += 1
+        # Everything below is counted once per fragment, from read 1.
+        if not (is_first and mate_mapped):
+            continue
 
-            # Everything below is counted once per fragment, from read 1.
-            if not (is_first and mate_mapped):
-                continue
+        contig.both_mapped += 1
 
-            contig.both_mapped += 1
+        if read.is_proper_pair:
+            contig.properpair += 1
 
-            if read.is_proper_pair:
-                contig.properpair += 1
+        if refid != read.next_reference_id:
+            contig.bridges += 1
+            continue
 
-            if refid != read.next_reference_id:
-                contig.bridges += 1
-                continue
+        mate_pos = read.next_reference_start
+        pos = read.reference_start
+        if abs(pos - mate_pos) > realistic_distance:
+            continue
 
-            mate_pos = read.next_reference_start
-            pos = read.reference_start
-            if abs(pos - mate_pos) > realistic_distance:
-                continue
-
-            # Expect mates on opposite strands, inner-facing.
-            if not read.is_reverse and read.mate_is_reverse:
-                if pos < mate_pos:
-                    contig.good += 1
-            elif read.is_reverse and not read.mate_is_reverse:
-                if mate_pos < pos:
-                    contig.good += 1
+        # Expect mates on opposite strands, inner-facing.
+        if not read.is_reverse and read.mate_is_reverse:
+            if pos < mate_pos:
+                contig.good += 1
+        elif read.is_reverse and not read.mate_is_reverse:
+            if mate_pos < pos:
+                contig.good += 1
 
     for contig in contigs:
         contig.calculate_uncovered_bases()
         contig.set_p_not_segmented(nullprior=nullprior)
 
     return contigs
+
+
+def compute_bam_metrics(
+    bam_path: str,
+    nullprior: float = DEFAULT_NULL_PRIOR,
+    realistic_distance: int | None = None,
+) -> list[ContigMetrics]:
+    """Compute per-contig metrics from a BAM on disk.
+
+    Convenience wrapper over :func:`accumulate_metrics` for a BAM that
+    already carries one alignment per fragment.  The full pipeline instead
+    streams assigned alignments straight in; see
+    :func:`transrate.assign.assign_fragments`.
+    """
+    if realistic_distance is None:
+        realistic_distance = estimate_realistic_distance(bam_path)
+
+    with pysam.AlignmentFile(bam_path, "rb") as bam:
+        return accumulate_metrics(
+            bam.references,
+            bam.lengths,
+            bam.fetch(until_eof=True),
+            realistic_distance=realistic_distance,
+            nullprior=nullprior,
+        )
 
 
 def write_metrics_csv(contigs: list[ContigMetrics], path: str) -> None:
