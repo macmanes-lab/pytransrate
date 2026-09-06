@@ -102,6 +102,32 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--max-seed-hits",
+        type=int,
+        default=300000,
+        help=(
+            "snap-aligner paired -H (default 300000, as the Ruby used; "
+            "snap's own default is 4000). Drives the scoring candidate pool "
+            "allocation -- lower it if snap crashes or exhausts memory"
+        ),
+    )
+    parser.add_argument(
+        "--edit-distance",
+        type=int,
+        default=30,
+        help="snap-aligner paired -d, max edit distance per pair (default 30)",
+    )
+    parser.add_argument(
+        "--max-candidate-pool",
+        type=int,
+        default=None,
+        help=(
+            "snap-aligner paired -mcp. Not passed by default: the Ruby's "
+            "value (10000000000000) overflows snap's atoi() into an arbitrary "
+            "number, and snap's own default is sane. Must be under 2147483647"
+        ),
+    )
+    parser.add_argument(
         "--keep-bam",
         action="store_true",
         help="keep the alignment BAM instead of deleting it on success",
@@ -193,7 +219,12 @@ def analyse_assembly(assembly_path, args, result_dir: Path) -> dict:
         seed_size=args.seed_size,
         location_size=args.location_size,
     )
-    bam = snap.map_reads(left, right, threads=args.threads)
+    bam = snap.map_reads(
+        left, right, threads=args.threads,
+        max_seed_hits=args.max_seed_hits,
+        edit_distance=args.edit_distance,
+        max_candidate_pool=args.max_candidate_pool,
+    )
     logger.info("%d fragments in library", snap.read_count)
 
     logger.info("quantifying with salmon...")

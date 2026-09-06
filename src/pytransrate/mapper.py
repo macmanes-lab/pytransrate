@@ -6,7 +6,8 @@ Port of ``lib/transrate/snap.rb``, targeting **snap-aligner 2.0.5**
 Every flag the Ruby passed still exists in 2.0.5 and was verified against the
 real binary: index takes ``-s``, ``-t``, ``-bSpace`` and ``-locationSize``;
 paired takes ``-s min max``, ``-H``, ``-h``, ``-d``, ``-t``, ``-b``, ``-M``,
-``-D``, ``-om``, ``-omax`` and ``-mcp``.  So the command line is unchanged.
+``-D``, ``-om`` and ``-omax``.  ``-mcp`` is no longer passed by default --
+see MAX_CANDIDATE_POOL below.
 
 What is *not* unchanged is the output: see SOFT_CLIPPING below.
 """
@@ -58,6 +59,32 @@ _LOCATION_SIZES = range(4, 9)
 #: not proof of a usable index -- a build that died partway leaves the
 #: directory behind with some of its files.
 _INDEX_MARKER = "GenomeIndex"
+
+# ---------------------------------------------------------------------------
+# MAX_CANDIDATE_POOL
+#
+# snap.rb passed `-mcp 10000000000000` with the comment "increase mcp to silly
+# high value to dec incidence of common SNAP fail" -- a workaround for
+# snap-aligner 1.0dev.96, the abandoned fork this port no longer targets.
+#
+# It never meant what it looks like. snap parses it with atoi() into an int,
+# and 10^13 is far past INT_MAX (2147483647), so the conversion is undefined
+# behaviour. Measured: atoi("10000000000000") returns 1316134912 -- a wrapped
+# garbage value that varies by platform, libc and optimisation level. The
+# request for "effectively unlimited" silently became an arbitrary number.
+#
+# snap has a sane DEFAULT_MAX_CANDIDATE_POOL_SIZE, so -mcp is no longer passed
+# unless asked for. Pass a value explicitly to restore it, and keep it under
+# INT_MAX if you do.
+# ---------------------------------------------------------------------------
+
+#: snap's -H. The Ruby's 300000, well above snap's own default of 4000; it
+#: drives the scoring candidate pool allocation
+#: (scoringCandidatePoolSize = min(mcp, maxBigHits * maxSeeds * 2)).
+DEFAULT_MAX_SEED_HITS = 300000
+
+#: snap's -d, maximum edit distance per read or pair.
+DEFAULT_EDIT_DISTANCE = 30
 
 _OVERFLOW_PATTERNS = (
     re.compile(r"Ran out of overflow table namespace"),
@@ -171,11 +198,20 @@ class Snap:
 
     # -- mapping ----------------------------------------------------------
 
-    def build_paired_command(self, left, right, threads: int, output: str):
+    def build_paired_command(
+        self,
+        left,
+        right,
+        threads: int,
+        output: str,
+        max_seed_hits: int = DEFAULT_MAX_SEED_HITS,
+        edit_distance: int = DEFAULT_EDIT_DISTANCE,
+        max_candidate_pool: int | None = None,
+    ):
         """Assemble the ``snap-aligner paired`` command.
 
-        Kept identical to the Ruby's flags; all were verified present in
-        snap-aligner 2.0.5.
+        Flags match the Ruby's, all verified present in snap-aligner 2.0.5,
+        with the exception of ``-mcp`` -- see MAX_CANDIDATE_POOL.
         """
         args = [self.binary, "paired", self.index_name]
         for l, r in zip(str(left).split(","), str(right).split(",")):
@@ -183,20 +219,30 @@ class Snap:
         args += [
             "-o", output,
             "-s", 0, 1000,        # min/max spacing between paired-read starts
-            "-H", 300000,         # max seed hits in paired mode
+            "-H", max_seed_hits,  # max seed hits in paired mode
             "-h", 2000,           # max seed hits when reverting to single
-            "-d", 30,             # max edit distance
+            "-d", edit_distance,  # max edit distance
             "-t", threads,
             "-b",                 # bind threads to cores
             "-M",                 # M-style CIGAR (now the default, kept explicit)
             "-D", 5,              # extra search depth, needed for -om
             "-om", 5,             # report multiple alignments
             "-omax", 10,          # cap alignments per pair
-            "-mcp", 10000000000000,
         ]
+        if max_candidate_pool is not None:
+            args += ["-mcp", max_candidate_pool]
         return args
 
-    def map_reads(self, left, right, threads: int = 8, output=None) -> str:
+    def map_reads(
+        self,
+        left,
+        right,
+        threads: int = 8,
+        output=None,
+        max_seed_hits: int = DEFAULT_MAX_SEED_HITS,
+        edit_distance: int = DEFAULT_EDIT_DISTANCE,
+        max_candidate_pool: int | None = None,
+    ) -> str:
         """Map paired reads, returning the path to the BAM.
 
         The BAM is left in **read order**, not coordinate sorted: both
@@ -217,7 +263,12 @@ class Snap:
             self._load_read_count(left)
             return self.bam
 
-        args = self.build_paired_command(left, right, threads, self.bam)
+        args = self.build_paired_command(
+            left, right, threads, self.bam,
+            max_seed_hits=max_seed_hits,
+            edit_distance=edit_distance,
+            max_candidate_pool=max_candidate_pool,
+        )
         result = run(args)
         self._save_read_count(result.stdout)
         self._save_logs(result.stdout, result.stderr)

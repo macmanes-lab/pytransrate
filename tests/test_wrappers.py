@@ -85,7 +85,7 @@ def test_paired_command_keeps_the_ruby_flags(snap):
     joined = " ".join(args)
     # Every flag the Ruby passed, all verified present in snap-aligner 2.0.5.
     for flag in ["-s", "-H", "-h", "-d", "-t", "-b", "-M", "-D", "-om",
-                 "-omax", "-mcp", "-o"]:
+                 "-omax", "-o"]:
         assert flag in args, flag
     assert "-s 0 1000" in joined
     assert "-om 5" in joined and "-omax 10" in joined
@@ -481,3 +481,54 @@ def test_cli_defaults_leave_the_sweep_enabled():
     args = build_parser().parse_args(["-a", "x.fa"])
     assert args.location_size is None
     assert args.seed_size == 23
+
+
+# ---------------------------------------------------------------------------
+# snap paired: tunables
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_is_not_passed_by_default(snap):
+    """MAX_CANDIDATE_POOL: the Ruby's value overflowed snap's atoi()."""
+    args = [str(a) for a in snap.build_paired_command("l.fq", "r.fq", 8, "o.bam")]
+    assert "-mcp" not in args
+
+
+def test_mcp_is_passed_when_asked_for(snap):
+    args = [str(a) for a in snap.build_paired_command(
+        "l.fq", "r.fq", 8, "o.bam", max_candidate_pool=1_000_000)]
+    assert args[args.index("-mcp") + 1] == "1000000"
+
+
+def test_seed_hits_and_edit_distance_are_tunable(snap):
+    args = [str(a) for a in snap.build_paired_command(
+        "l.fq", "r.fq", 8, "o.bam", max_seed_hits=4000, edit_distance=20)]
+    assert args[args.index("-H") + 1] == "4000"
+    assert args[args.index("-d") + 1] == "20"
+
+
+def test_paired_defaults_match_the_ruby(snap):
+    args = [str(a) for a in snap.build_paired_command("l.fq", "r.fq", 8, "o.bam")]
+    assert args[args.index("-H") + 1] == "300000"
+    assert args[args.index("-d") + 1] == "30"
+
+
+def test_cli_exposes_the_paired_tunables():
+    from pytransrate.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["-a", "x.fa", "--max-seed-hits", "4000", "--edit-distance", "20",
+         "--max-candidate-pool", "1000000"]
+    )
+    assert args.max_seed_hits == 4000
+    assert args.edit_distance == 20
+    assert args.max_candidate_pool == 1_000_000
+
+
+def test_cli_defaults_omit_mcp():
+    from pytransrate.cli import build_parser
+
+    args = build_parser().parse_args(["-a", "x.fa"])
+    assert args.max_candidate_pool is None
+    assert args.max_seed_hits == 300000
+    assert args.edit_distance == 30
