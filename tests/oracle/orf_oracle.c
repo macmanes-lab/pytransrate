@@ -1,6 +1,13 @@
-/* Standalone oracle: the bodies of method_composition and method_longest_orf
- * from ext/transrate/transrate.c, with the Ruby VALUE wrappers removed and
- * nothing else changed. Reads one sequence per line on stdin, prints
+/* Standalone oracle for tests/test_sequence.py.
+ *
+ * The bodies of method_composition and method_longest_orf from the original
+ * Ruby transrate's C extension (ext/transrate/transrate.c), with the Ruby
+ * VALUE wrappers removed and nothing else changed. The extension itself was
+ * deleted when the port completed; this copy is kept deliberately, as the
+ * reference the Python implementation is diffed against. Do not "tidy" it --
+ * its value is that it is not our code.
+ *
+ * Reads one sequence per line on stdin, prints
  *   <a> <c> <g> <t> <n> <longest_orf>
  * per line. */
 #include <stdio.h>

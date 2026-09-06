@@ -26,6 +26,7 @@ from pathlib import Path
 
 from pytransrate import __version__
 from pytransrate.assembly import Assembly, AssemblyError
+from pytransrate.banner import TAGLINE, print_banner
 from pytransrate.cmd import CommandError
 from pytransrate.mapper import Snap
 from pytransrate.output import write_assemblies_csv, write_contigs_csv
@@ -44,8 +45,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="transrate",
         description=(
-            "Analyse a de-novo transcriptome assembly using sequence-based "
-            "and read-mapping metrics."
+            f"pytransrate: {TAGLINE}.\n\n"
+            "Analyses a de-novo transcriptome assembly using sequence-based "
+            "and read-mapping metrics, scoring how well the assembly is "
+            "supported by the reads it was built from."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -163,7 +166,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="keep the alignment BAM instead of deleting it on success",
     )
-    parser.add_argument("--version", action="version", version=__version__)
+    parser.add_argument(
+        "--no-banner", action="store_true", help="suppress the startup banner"
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"pytransrate {__version__}",
+    )
     return parser
 
 
@@ -324,6 +334,8 @@ def analyse_assembly(assembly_path, args, result_dir: Path) -> dict:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(args.loglevel)
+    if not args.no_banner:
+        print_banner()
 
     try:
         assemblies = check_arguments(args)

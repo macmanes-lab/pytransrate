@@ -645,3 +645,82 @@ def test_cli_defaults_omit_mcp():
     args = build_parser().parse_args(["-a", "x.fa"])
     assert args.max_candidate_pool is None
     assert args.edit_distance == 30
+
+
+# ---------------------------------------------------------------------------
+# banner
+# ---------------------------------------------------------------------------
+
+
+def test_banner_always_carries_the_version():
+    from pytransrate import __version__
+    from pytransrate.banner import banner
+
+    for width in (40, 60, 80, 200):
+        assert __version__ in banner(width=width), width
+
+
+def test_banner_names_the_tool_and_what_it_does():
+    from pytransrate.banner import TAGLINE, banner
+
+    wide = banner(width=100)
+    assert TAGLINE in wide
+    assert "transcriptome" in TAGLINE
+
+    narrow = banner(width=50)
+    assert "pytransrate" in narrow
+    assert TAGLINE in narrow
+
+
+def test_banner_falls_back_when_the_terminal_is_narrow():
+    from pytransrate.banner import banner
+
+    narrow = banner(width=50)
+    assert max(len(line) for line in narrow.split("\n")) <= 60
+    # The wordmark would wrap and look broken at this width.
+    assert "░" not in narrow
+
+
+def test_banner_colour_is_opt_in():
+    from pytransrate.banner import banner
+
+    assert "\033[" not in banner(colour=False, width=100)
+    assert "\033[" in banner(colour=True, width=100)
+
+
+def test_banner_respects_no_color(monkeypatch):
+    import io
+
+    from pytransrate.banner import _use_colour
+
+    tty = io.StringIO()
+    tty.isatty = lambda: True
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setenv("TERM", "xterm")
+    assert _use_colour(tty)
+    monkeypatch.setenv("NO_COLOR", "1")
+    assert not _use_colour(tty)
+
+
+def test_banner_is_plain_when_not_a_terminal():
+    import io
+
+    from pytransrate.banner import _use_colour
+
+    assert not _use_colour(io.StringIO())
+
+
+def test_banner_goes_to_stderr_leaving_stdout_clean(capsys):
+    from pytransrate.banner import print_banner
+
+    print_banner()
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "pytransrate" in captured.err or "░" in captured.err
+
+
+def test_no_banner_flag_exists():
+    from pytransrate.cli import build_parser
+
+    assert build_parser().parse_args(["-a", "x.fa"]).no_banner is False
+    assert build_parser().parse_args(["-a", "x.fa", "--no-banner"]).no_banner
