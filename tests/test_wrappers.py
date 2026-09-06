@@ -8,6 +8,7 @@ against the real binaries lives in tests/test_pipeline.py.
 from __future__ import annotations
 
 import gzip
+from pathlib import Path
 
 import pytest
 
@@ -288,3 +289,195 @@ def test_read_paths_are_absolutised(tmp_path, monkeypatch):
     check_arguments(args)
     assert args.left.startswith("/")
     assert args.right.startswith("/")
+
+
+# ---------------------------------------------------------------------------
+# snap index: locationSize sweep and cleanup
+# ---------------------------------------------------------------------------
+
+
+class _Result:
+    def __init__(self, ok, stderr=""):
+        self.ok = ok
+        self.stderr = stderr
+        self.stdout = ""
+
+
+_OVERFLOW = (
+    "Ran out of overflow table namespace. This genome cannot be indexed "
+    "with this seed and location size.  Increase at least one.\n"
+)
+
+
+def _fake_run(monkeypatch, outcomes, calls):
+    import transrate.mapper as mapper
+
+    def fake(args, **kwargs):
+        args = [str(a) for a in args]
+        calls.append(args)
+        # Materialise what snap leaves behind, so cleanup is exercised.
+        index_dir = Path(args[3])
+        index_dir.mkdir(exist_ok=True)
+        result = outcomes.pop(0)
+        for name in ("Genome", "GenomeIndexHash", "OverflowTable"):
+            (index_dir / name).write_text("x")
+        if result.ok:
+            (index_dir / "GenomeIndex").write_text("x")
+        return result
+
+    monkeypatch.setattr(mapper, "run", fake)
+
+
+def _snap():
+    obj = Snap.__new__(Snap)
+    obj.binary = "snap-aligner"
+    obj.index_name = None
+    obj.index_built = False
+    obj.bam = None
+    obj.read_count = 0
+    obj._read_count_file = None
+    return obj
+
+
+def _location_sizes(calls):
+    return [c[c.index("-locationSize") + 1] for c in calls]
+
+
+def test_index_starts_at_location_size_four(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    calls = []
+    _fake_run(monkeypatch, [_Result(True)], calls)
+    _snap().build_index("a.fa")
+    assert _location_sizes(calls) == ["4"]
+
+
+def test_index_steps_up_on_overflow(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    calls = []
+    _fake_run(
+        monkeypatch,
+        [_Result(False, _OVERFLOW), _Result(False, _OVERFLOW), _Result(True)],
+        calls,
+    )
+    _snap().build_index("a.fa")
+    assert _location_sizes(calls) == ["4", "5", "6"]
+
+
+def test_partial_index_is_removed_between_attempts(tmp_path, monkeypatch):
+    """rmdir() could not do this -- snap leaves four files behind."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    seen = []
+
+    import transrate.mapper as mapper
+
+    outcomes = [_Result(False, _OVERFLOW), _Result(True)]
+
+    def fake(args, **kwargs):
+        args = [str(a) for a in args]
+        index_dir = Path(args[3])
+        seen.append(sorted(p.name for p in index_dir.iterdir())
+                    if index_dir.is_dir() else [])
+        index_dir.mkdir(exist_ok=True)
+        for name in ("Genome", "GenomeIndexHash", "OverflowTable"):
+            (index_dir / name).write_text("x")
+        result = outcomes.pop(0)
+        if result.ok:
+            (index_dir / "GenomeIndex").write_text("x")
+        return result
+
+    monkeypatch.setattr(mapper, "run", fake)
+    _snap().build_index("a.fa")
+    # The second attempt must start from a clean directory.
+    assert seen[1] == []
+
+
+def test_index_raises_when_every_size_overflows(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    calls = []
+    _fake_run(monkeypatch, [_Result(False, _OVERFLOW)] * 5, calls)
+    with pytest.raises(Exception, match="seed-size"):
+        _snap().build_index("a.fa")
+    assert _location_sizes(calls) == ["4", "5", "6", "7", "8"]
+
+
+def test_explicit_location_size_skips_the_sweep(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    calls = []
+    _fake_run(monkeypatch, [_Result(True)], calls)
+    _snap().build_index("a.fa", location_size=6)
+    assert _location_sizes(calls) == ["6"]
+
+
+def test_explicit_location_size_does_not_retry(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    calls = []
+    _fake_run(monkeypatch, [_Result(False, _OVERFLOW)], calls)
+    with pytest.raises(Exception, match="location-size"):
+        _snap().build_index("a.fa", location_size=6)
+    assert _location_sizes(calls) == ["6"]
+
+
+def test_location_size_out_of_range_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    with pytest.raises(Exception, match="between 4 and 8"):
+        _snap().build_index("a.fa", location_size=9)
+
+
+def test_non_overflow_failure_does_not_sweep(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    calls = []
+    _fake_run(monkeypatch, [_Result(False, "disk on fire")], calls)
+    with pytest.raises(Exception, match="disk on fire"):
+        _snap().build_index("a.fa")
+    assert len(calls) == 1
+
+
+def test_complete_index_is_reused(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    index = tmp_path / "a"
+    index.mkdir()
+    (index / "GenomeIndex").write_text("x")
+    calls = []
+    _fake_run(monkeypatch, [], calls)
+    _snap().build_index("a.fa")
+    assert calls == []
+
+
+def test_partial_index_is_not_mistaken_for_a_complete_one(tmp_path, monkeypatch):
+    """A directory without the marker must be rebuilt, not trusted."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    index = tmp_path / "a"
+    index.mkdir()
+    (index / "Genome").write_text("x")     # partial: no GenomeIndex marker
+    calls = []
+    _fake_run(monkeypatch, [_Result(True)], calls)
+    _snap().build_index("a.fa")
+    assert len(calls) == 1
+
+
+def test_cli_exposes_both_index_knobs():
+    from transrate.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["-a", "x.fa", "--location-size", "6", "--seed-size", "25"]
+    )
+    assert args.location_size == 6
+    assert args.seed_size == 25
+
+
+def test_cli_defaults_leave_the_sweep_enabled():
+    from transrate.cli import build_parser
+
+    args = build_parser().parse_args(["-a", "x.fa"])
+    assert args.location_size is None
+    assert args.seed_size == 23

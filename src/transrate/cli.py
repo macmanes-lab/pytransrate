@@ -81,6 +81,27 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--location-size",
+        type=int,
+        choices=range(4, 9),
+        metavar="{4-8}",
+        default=None,
+        help=(
+            "snap-aligner -locationSize. By default transrate starts at 4 and "
+            "steps up to 8 if the index overflows; set this to go straight to "
+            "a value and skip the failed builds"
+        ),
+    )
+    parser.add_argument(
+        "--seed-size",
+        type=int,
+        default=23,
+        help=(
+            "snap-aligner index -s (default 23). Raising it is the other fix "
+            "when an assembly overflows the index at every location size"
+        ),
+    )
+    parser.add_argument(
         "--keep-bam",
         action="store_true",
         help="keep the alignment BAM instead of deleting it on success",
@@ -166,7 +187,12 @@ def analyse_assembly(assembly_path, args, result_dir: Path) -> dict:
 
     logger.info("mapping reads with snap-aligner...")
     snap = Snap()
-    snap.build_index(assembly_path, threads=args.threads)
+    snap.build_index(
+        assembly_path,
+        threads=args.threads,
+        seed_size=args.seed_size,
+        location_size=args.location_size,
+    )
     bam = snap.map_reads(left, right, threads=args.threads)
     logger.info("%d fragments in library", snap.read_count)
 

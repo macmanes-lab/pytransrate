@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import re
 from pathlib import Path
 
@@ -50,7 +51,13 @@ class SnapError(CommandError):
 # ---------------------------------------------------------------------------
 
 #: locationSize values tried when the index overflows, as in the Ruby.
+#: SNAP enforces 4..8 inclusive and hard-exits outside it.
 _LOCATION_SIZES = range(4, 9)
+
+#: Written by snap-aligner once an index is complete. The directory alone is
+#: not proof of a usable index -- a build that died partway leaves the
+#: directory behind with some of its files.
+_INDEX_MARKER = "GenomeIndex"
 
 _OVERFLOW_PATTERNS = (
     re.compile(r"Ran out of overflow table namespace"),
@@ -73,29 +80,63 @@ class Snap:
 
     # -- index ------------------------------------------------------------
 
-    def build_index(self, fasta, threads: int = 8, seed_size: int = 23) -> str:
-        """Build a snap index, retrying with a larger location size.
+    def build_index(
+        self,
+        fasta,
+        threads: int = 8,
+        seed_size: int = 23,
+        location_size: int | None = None,
+    ) -> str:
+        """Build a snap index.
 
-        The Ruby walked ``-locationSize`` from 4 to 8 because large or
-        repetitive assemblies overflow the default table; the same loop is
-        kept here.
+        ``-locationSize`` sets how many bytes each genome location occupies.
+        Four is enough for most assemblies, but a large or highly repetitive
+        one exhausts the overflow table and snap refuses to index it:
+
+            Ran out of overflow table namespace. This genome cannot be
+            indexed with this seed and location size.  Increase at least one.
+
+        Args:
+            fasta: assembly to index.
+            threads: passed as ``-t`` (no space, as snap requires).
+            seed_size: passed as ``-s``.
+            location_size: fix ``-locationSize`` at this value and do not
+                sweep. ``None`` (the default) tries 4 and steps up to 8 on
+                an overflow error, as the Ruby did. Fixing it is worth doing
+                when you already know an assembly needs a larger value --
+                each failed attempt is a full index build.
+
+        Raises:
+            SnapError: if the build fails, or overflows at every size tried.
         """
         fasta = Path(fasta)
         self.index_name = fasta.stem
         index_dir = Path(self.index_name)
 
-        if index_dir.is_dir():
+        # Require the marker, not just the directory: a build killed partway
+        # leaves the directory behind, and trusting it yields a corrupt index.
+        if (index_dir / _INDEX_MARKER).exists():
             self.index_built = True
             return self.index_name
 
+        if location_size is not None:
+            if location_size not in _LOCATION_SIZES:
+                raise SnapError(
+                    f"location_size must be between {_LOCATION_SIZES.start} and "
+                    f"{_LOCATION_SIZES.stop - 1} inclusive, got {location_size}"
+                )
+            sizes = [location_size]
+        else:
+            sizes = list(_LOCATION_SIZES)
+
         last_error = ""
-        for location_size in _LOCATION_SIZES:
+        for size in sizes:
             args = [
                 self.binary, "index", str(fasta), self.index_name,
                 "-s", seed_size,
                 f"-t{threads}",
                 "-bSpace",              # contig name ends at the first space
-                "-locationSize", location_size,
+                "-locationSize", size,
             ]
             result = run(args)
             if result.ok:
@@ -104,19 +145,29 @@ class Snap:
 
             last_error = result.stderr or result.stdout
             if any(p.search(last_error) for p in _OVERFLOW_PATTERNS):
-                logger.warning(
-                    "snap index build overflowed at -locationSize %d, retrying",
-                    location_size,
-                )
+                # Clear the partial index before retrying. rmdir() will not
+                # do -- snap leaves Genome, GenomeIndex, GenomeIndexHash and
+                # OverflowTable behind, and rmdir only removes empty dirs.
                 if index_dir.is_dir():
-                    try:
-                        index_dir.rmdir()
-                    except OSError:
-                        pass
+                    shutil.rmtree(index_dir, ignore_errors=True)
+                if size == sizes[-1]:
+                    break
+                logger.warning(
+                    "snap index overflowed at -locationSize %d, retrying at %d",
+                    size,
+                    size + 1,
+                )
                 continue
             raise SnapError(f"Failed to build snap index\n{last_error}")
 
-        raise SnapError(f"Failed to build snap index\n{last_error}")
+        hint = (
+            " Every location size from "
+            f"{sizes[0]} to {sizes[-1]} overflowed; try a larger --seed-size."
+            if len(sizes) > 1
+            else f" Retry without --location-size to sweep {_LOCATION_SIZES.start}"
+                 f"-{_LOCATION_SIZES.stop - 1}, or use a larger --seed-size."
+        )
+        raise SnapError(f"Failed to build snap index.{hint}\n{last_error}")
 
     # -- mapping ----------------------------------------------------------
 
