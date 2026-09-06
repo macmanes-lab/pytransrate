@@ -3,7 +3,7 @@
 Coverage is validated against ``samtools depth -a`` -- a genuinely
 independent implementation, bundled with pysam -- rather than against
 bam-read, which is the artefact being replaced and is wrong about soft clips
-(see SOFT_CLIP_FIX in transrate.bam_metrics).
+(see SOFT_CLIP_FIX in pytransrate.bam_metrics).
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import numpy as np
 import pysam
 import pytest
 
-from transrate.bam_metrics import (
+from pytransrate.bam_metrics import (
     CSV_COLUMNS,
     ContigMetrics,
     compute_bam_metrics,

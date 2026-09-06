@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from transrate.assembly import (
+from pytransrate.assembly import (
     BASIC_STATS_KEYS,
     Assembly,
     AssemblyError,
     parse_fasta,
 )
-from transrate.contig import SCORE_FLOOR, Contig
+from pytransrate.contig import SCORE_FLOOR, Contig
 
 
 def _write(tmp_path, text, name="a.fa"):

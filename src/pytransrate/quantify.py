@@ -10,7 +10,7 @@ Three changes were forced by the rewrite, all verified against the binary:
 2.  ``--sampleOut`` / ``--sampleUnaligned`` are accepted but inert: salmon
     logs "accepted but not yet implemented and have no effect" and writes no
     BAM.  ``postSample.bam`` no longer exists, so fragment assignment moved
-    in-process to :mod:`transrate.assign`.
+    in-process to :mod:`~pytransrate.assign`.
 3.  ``--libType a`` became ``-l A``.
 
 ``quant.sf`` itself is unchanged -- still Name, Length, EffectiveLength,
@@ -22,7 +22,7 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from transrate.cmd import CommandError, run, which
+from pytransrate.cmd import CommandError, run, which
 
 __all__ = ["SalmonError", "Salmon", "Expression", "load_expression"]
 

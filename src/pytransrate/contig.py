@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from transrate.sequence import base_composition, longest_orf
+from pytransrate.sequence import base_composition, longest_orf
 
 __all__ = ["SCORE_FLOOR", "Contig"]
 

@@ -96,7 +96,7 @@ def run_output(dataset):
     out = dataset["dir"] / "out"
     result = subprocess.run(
         [
-            sys.executable, "-m", "transrate.cli",
+            sys.executable, "-m", "pytransrate.cli",
             "-o", str(out),
             "-t", "2",
             "-a", str(dataset["fasta"]),
@@ -183,7 +183,7 @@ def test_rerun_refuses_to_overwrite(dataset, run_output):
     """The Ruby guarded against clobbering assemblies.csv; so do we."""
     result = subprocess.run(
         [
-            sys.executable, "-m", "transrate.cli",
+            sys.executable, "-m", "pytransrate.cli",
             "-o", str(run_output),
             "-a", str(dataset["fasta"]),
         ],

@@ -12,8 +12,8 @@ import csv
 
 import pytest
 
-from transrate.assembly import Assembly
-from transrate.output import (
+from pytransrate.assembly import Assembly
+from pytransrate.output import (
     assemblies_csv_columns,
     contigs_csv_columns,
     write_assemblies_csv,

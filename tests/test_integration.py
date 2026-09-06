@@ -13,10 +13,10 @@ import numpy as np
 import pysam
 import pytest
 
-from transrate.assembly import Assembly
-from transrate.bam_metrics import compute_bam_metrics
-from transrate.output import write_assemblies_csv, write_contigs_csv
-from transrate.score import ScoreOptimiser
+from pytransrate.assembly import Assembly
+from pytransrate.bam_metrics import compute_bam_metrics
+from pytransrate.output import write_assemblies_csv, write_contigs_csv
+from pytransrate.score import ScoreOptimiser
 
 CONTIG_LEN = 600
 N_CONTIGS = 6

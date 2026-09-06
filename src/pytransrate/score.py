@@ -33,7 +33,7 @@ class ScoreOptimiser:
     """Computes the raw, weighted and cutoff-optimised assembly scores.
 
     Args:
-        assembly: an :class:`~transrate.assembly.Assembly`.
+        assembly: an :class:`~pytransrate.assembly.Assembly`.
         fragments: total read fragments (``read_stats['fragments']``).
         good: fragments mapping consistently (``read_stats['good_mappings']``).
     """

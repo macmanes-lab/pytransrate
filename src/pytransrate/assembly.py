@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 
-from transrate.contig import Contig
+from pytransrate.contig import Contig
 
 __all__ = ["AssemblyError", "Assembly", "BASIC_STATS_KEYS", "CONTIG_METRICS_KEYS"]
 

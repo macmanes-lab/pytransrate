@@ -12,10 +12,10 @@ from pathlib import Path
 
 import pytest
 
-from transrate.cmd import CommandError, CommandResult, run, which
-from transrate.mapper import Snap
-from transrate.quantify import Salmon, SalmonError, load_expression
-from transrate.read_metrics import get_read_length
+from pytransrate.cmd import CommandError, CommandResult, run, which
+from pytransrate.mapper import Snap
+from pytransrate.quantify import Salmon, SalmonError, load_expression
+from pytransrate.read_metrics import get_read_length
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +212,7 @@ def test_get_read_length_uses_the_first_file_only(tmp_path):
 
 
 def _args(**kwargs):
-    from transrate.cli import build_parser
+    from pytransrate.cli import build_parser
 
     argv = []
     for key, value in kwargs.items():
@@ -225,7 +225,7 @@ def _args(**kwargs):
 
 
 def test_reference_is_rejected_with_an_explanation(tmp_path):
-    from transrate.cli import check_arguments
+    from pytransrate.cli import check_arguments
 
     fasta = tmp_path / "a.fa"
     fasta.write_text(">c\nACGT\n")
@@ -235,14 +235,14 @@ def test_reference_is_rejected_with_an_explanation(tmp_path):
 
 
 def test_missing_assembly_is_rejected():
-    from transrate.cli import check_arguments
+    from pytransrate.cli import check_arguments
 
     with pytest.raises(CommandError, match="does not exist"):
         check_arguments(_args(assembly="/nope/missing.fa"))
 
 
 def test_duplicate_assemblies_are_rejected(tmp_path):
-    from transrate.cli import check_arguments
+    from pytransrate.cli import check_arguments
 
     fasta = tmp_path / "a.fa"
     fasta.write_text(">c\nACGT\n")
@@ -252,7 +252,7 @@ def test_duplicate_assemblies_are_rejected(tmp_path):
 
 
 def test_left_without_right_is_rejected(tmp_path):
-    from transrate.cli import check_arguments
+    from pytransrate.cli import check_arguments
 
     fasta = tmp_path / "a.fa"
     fasta.write_text(">c\nACGT\n")
@@ -264,7 +264,7 @@ def test_left_without_right_is_rejected(tmp_path):
 
 
 def test_mismatched_read_file_counts_are_rejected(tmp_path):
-    from transrate.cli import check_arguments
+    from pytransrate.cli import check_arguments
 
     fasta = tmp_path / "a.fa"
     fasta.write_text(">c\nACGT\n")
@@ -277,7 +277,7 @@ def test_mismatched_read_file_counts_are_rejected(tmp_path):
 
 def test_read_paths_are_absolutised(tmp_path, monkeypatch):
     """They must resolve before the run chdirs into the output directory."""
-    from transrate.cli import check_arguments
+    from pytransrate.cli import check_arguments
 
     fasta = tmp_path / "a.fa"
     fasta.write_text(">c\nACGT\n")
@@ -310,7 +310,7 @@ _OVERFLOW = (
 
 
 def _fake_run(monkeypatch, outcomes, calls):
-    import transrate.mapper as mapper
+    import pytransrate.mapper as mapper
 
     def fake(args, **kwargs):
         args = [str(a) for a in args]
@@ -371,7 +371,7 @@ def test_partial_index_is_removed_between_attempts(tmp_path, monkeypatch):
     (tmp_path / "a.fa").write_text(">c\nACGT\n")
     seen = []
 
-    import transrate.mapper as mapper
+    import pytransrate.mapper as mapper
 
     outcomes = [_Result(False, _OVERFLOW), _Result(True)]
 
@@ -466,7 +466,7 @@ def test_partial_index_is_not_mistaken_for_a_complete_one(tmp_path, monkeypatch)
 
 
 def test_cli_exposes_both_index_knobs():
-    from transrate.cli import build_parser
+    from pytransrate.cli import build_parser
 
     args = build_parser().parse_args(
         ["-a", "x.fa", "--location-size", "6", "--seed-size", "25"]
@@ -476,7 +476,7 @@ def test_cli_exposes_both_index_knobs():
 
 
 def test_cli_defaults_leave_the_sweep_enabled():
-    from transrate.cli import build_parser
+    from pytransrate.cli import build_parser
 
     args = build_parser().parse_args(["-a", "x.fa"])
     assert args.location_size is None

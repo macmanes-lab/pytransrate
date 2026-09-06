@@ -19,7 +19,7 @@ import shutil
 import re
 from pathlib import Path
 
-from transrate.cmd import CommandError, run, which
+from pytransrate.cmd import CommandError, run, which
 
 __all__ = ["SnapError", "Snap"]
 
@@ -41,13 +41,13 @@ class SnapError(CommandError):
 #
 # The old bam-read binary advanced its reference cursor on 'S' as though it
 # were a deletion, so those alignments would have had their coverage
-# displaced rightward by the clip length.  transrate.bam_metrics follows the
+# displaced rightward by the clip length.  pytransrate.bam_metrics follows the
 # SAM spec instead (see SOFT_CLIP_FIX there).  Do not reintroduce bam-read
 # alongside this aligner.
 #
 # Note also that snap-aligner emits **no AS tag** -- only NM -- which
 # constrains both salmon's scoring and our own fragment assignment.  See
-# transrate.quantify and transrate.assign.
+# pytransrate.quantify and pytransrate.assign.
 # ---------------------------------------------------------------------------
 
 #: locationSize values tried when the index overflows, as in the Ruby.
@@ -200,8 +200,8 @@ class Snap:
         """Map paired reads, returning the path to the BAM.
 
         The BAM is left in **read order**, not coordinate sorted: both
-        :func:`transrate.assign.assign_fragments` and
-        :func:`transrate.bam_metrics.estimate_realistic_distance` require
+        :func:`~pytransrate.assign.assign_fragments` and
+        :func:`~pytransrate.bam_metrics.estimate_realistic_distance` require
         mates and multi-mappings to be adjacent.
         """
         if not self.index_built:

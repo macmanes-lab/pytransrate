@@ -12,7 +12,7 @@ from __future__ import annotations
 import pysam
 import pytest
 
-from transrate.assign import (
+from pytransrate.assign import (
     ORPHAN_EDIT_FRACTION,
     assign_fragments,
     group_by_fragment,

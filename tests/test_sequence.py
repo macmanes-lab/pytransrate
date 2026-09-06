@@ -17,7 +17,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from transrate.sequence import (
+from pytransrate.sequence import (
     BASES,
     base_composition,
     dibase_composition,

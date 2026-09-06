@@ -8,11 +8,11 @@ Ruby transrate shelled out to.  Produces the same ten columns:
 
 One deliberate behavioural change from the C++ is documented at SOFT_CLIP_FIX.
 Two quirks are preserved on purpose and documented at FRAGMENT_ESTIMATOR and
-in :mod:`transrate.segmenter` (BINNING_QUIRK).
+in :mod:`~pytransrate.segmenter` (BINNING_QUIRK).
 
 The input is expected to carry exactly one alignment per fragment -- the role
 ``postSample.bam`` played under salmon 0.8.2's ``--sampleOut``.  See
-:mod:`transrate.assign`.
+:mod:`~pytransrate.assign`.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pysam
 
-from transrate.segmenter import DEFAULT_NULL_PRIOR, bin_coverage, prob_not_segmented
+from pytransrate.segmenter import DEFAULT_NULL_PRIOR, bin_coverage, prob_not_segmented
 
 __all__ = [
     "CSV_COLUMNS",
@@ -289,7 +289,7 @@ def accumulate_metrics(
     """Accumulate per-contig metrics from a stream of alignments.
 
     Takes an iterable rather than a path so that
-    :func:`transrate.assign.assign_fragments` can feed alignments straight
+    :func:`~pytransrate.assign.assign_fragments` can feed alignments straight
     through without staging them in a file -- the round trip salmon 0.8.2's
     ``postSample.bam`` used to force.
 
@@ -382,7 +382,7 @@ def compute_bam_metrics(
     Convenience wrapper over :func:`accumulate_metrics` for a BAM that
     already carries one alignment per fragment.  The full pipeline instead
     streams assigned alignments straight in; see
-    :func:`transrate.assign.assign_fragments`.
+    :func:`~pytransrate.assign.assign_fragments`.
     """
     if realistic_distance is None:
         realistic_distance = estimate_realistic_distance(bam_path)

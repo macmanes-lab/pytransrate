@@ -24,14 +24,14 @@ import os
 import sys
 from pathlib import Path
 
-from transrate import __version__
-from transrate.assembly import Assembly, AssemblyError
-from transrate.cmd import CommandError
-from transrate.mapper import Snap
-from transrate.output import write_assemblies_csv, write_contigs_csv
-from transrate.quantify import Salmon
-from transrate.read_metrics import ReadMetrics, get_read_length
-from transrate.score import ScoreOptimiser
+from pytransrate import __version__
+from pytransrate.assembly import Assembly, AssemblyError
+from pytransrate.cmd import CommandError
+from pytransrate.mapper import Snap
+from pytransrate.output import write_assemblies_csv, write_contigs_csv
+from pytransrate.quantify import Salmon
+from pytransrate.read_metrics import ReadMetrics, get_read_length
+from pytransrate.score import ScoreOptimiser
 
 logger = logging.getLogger("transrate")
 

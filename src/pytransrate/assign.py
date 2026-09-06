@@ -13,7 +13,7 @@ deterministic maximum-a-posteriori assignment built from what the BAM and
 not trying to -- see ASSIGNMENT_MODEL.
 
 Because it consumes alignments and yields alignments, the caller can stream
-straight into :func:`transrate.bam_metrics.accumulate_metrics` without ever
+straight into :func:`~pytransrate.bam_metrics.accumulate_metrics` without ever
 staging a BAM on disk -- removing a write and a re-read that the
 ``postSample.bam`` design forced.
 """
@@ -200,7 +200,7 @@ def assign_fragments(
         alignments: read-ordered alignments (see :func:`group_by_fragment`).
         references: reference names by id, e.g. ``bam.references``.
         expression: salmon output from
-            :func:`transrate.quantify.load_expression`.  When omitted every
+            :func:`~pytransrate.quantify.load_expression`.  When omitted every
             transcript gets an equal prior and assignment falls back to
             alignment quality alone.
         error_rate: per-base error rate for the likelihood.

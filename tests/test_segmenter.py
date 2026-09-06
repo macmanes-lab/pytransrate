@@ -19,7 +19,7 @@ import math
 import numpy as np
 import pytest
 
-from transrate.segmenter import (
+from pytransrate.segmenter import (
     DEFAULT_NULL_PRIOR,
     NUM_BINS,
     NUM_STATES,

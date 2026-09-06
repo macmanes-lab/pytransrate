@@ -7,8 +7,8 @@ import math
 
 import pytest
 
-from transrate.assembly import Assembly
-from transrate.score import ScoreOptimiser, geomean
+from pytransrate.assembly import Assembly
+from pytransrate.score import ScoreOptimiser, geomean
 
 
 def _assembly(tmp_path, specs):

@@ -20,7 +20,7 @@ from __future__ import annotations
 import csv
 from collections import OrderedDict
 
-from transrate.assembly import BASIC_STATS_KEYS, CONTIG_METRICS_KEYS
+from pytransrate.assembly import BASIC_STATS_KEYS, CONTIG_METRICS_KEYS
 
 __all__ = [
     "READ_STATS_KEYS",

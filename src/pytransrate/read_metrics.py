@@ -4,7 +4,7 @@ Port of ``lib/transrate/read_metrics.rb``.  The Ruby drove three external
 steps here -- snap, salmon with ``--sampleOut``, then the ``bam-read``
 binary over the resulting ``postSample.bam``.  Only the first two are still
 external; assignment and per-contig accumulation happen in-process via
-:mod:`transrate.assign` and :mod:`transrate.bam_metrics`.
+:mod:`~pytransrate.assign` and :mod:`~pytransrate.bam_metrics`.
 """
 
 from __future__ import annotations
@@ -15,15 +15,15 @@ from collections import OrderedDict
 
 import pysam
 
-from transrate.assign import assign_fragments
-from transrate.bam_metrics import accumulate_metrics, estimate_realistic_distance
-from transrate.segmenter import DEFAULT_NULL_PRIOR
+from pytransrate.assign import assign_fragments
+from pytransrate.bam_metrics import accumulate_metrics, estimate_realistic_distance
+from pytransrate.segmenter import DEFAULT_NULL_PRIOR
 
 __all__ = ["READ_STATS_KEYS", "ReadMetrics", "get_read_length"]
 
 logger = logging.getLogger("transrate")
 
-#: Key order of ``ReadMetrics#read_stats``; mirrored in transrate.output.
+#: Key order of ``ReadMetrics#read_stats``; mirrored in pytransrate.output.
 READ_STATS_KEYS = (
     "fragments",
     "fragments_mapped",
