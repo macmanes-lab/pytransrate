@@ -105,28 +105,40 @@ def bin_coverage(
     if ref_length == 0:
         return states if pad_bins else states[:0]
 
-    # (ref_length / 30) + 1 in C++ integer arithmetic.
+    # (ref_length / 30) + 1 in C++ integer arithmetic. Rounding up means the
+    # bin count never exceeds n_bins, so no clamping is needed below.
     bin_width = ref_length // n_bins + 1
 
-    pos = 0
-    total = 0
-    counter = 0
-    for i in range(ref_length):
-        total += int(coverage[i])
-        counter += 1
-        if counter == bin_width or i == ref_length - 1:
-            if pos < n_bins:
-                mean = total // counter  # integer division, as in C++
-                if mean <= 0:
-                    # log2(0) is -inf; the C++ max(0.0, ...) pins it to 0.
-                    states[pos] = 0
-                else:
-                    states[pos] = min(max_state, int(math.log2(mean)))
-                pos += 1
-            counter = 0
-            total = 0
+    # Vectorised equivalent of the C++ per-base accumulation loop: sum each
+    # bin, then take the integer mean exactly as `total / counter` did.
+    starts = np.arange(0, ref_length, bin_width)
+    sums = np.add.reduceat(coverage, starts)
+    counts = np.diff(np.append(starts, ref_length))
+    means = sums // counts  # integer division, as in C++
 
-    return states if pad_bins else states[:pos]
+    # log2(0) is -inf; the C++ max(0.0, ...) pins it to 0. Truncation toward
+    # zero matches the C++ (int) cast, and equals floor for means >= 1.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        logs = np.log2(np.maximum(means, 1))
+    binned = np.minimum(max_state, logs.astype(np.int64))
+    binned[means <= 0] = 0
+
+    n_filled = binned.size
+    states[:n_filled] = binned
+    return states if pad_bins else states[:n_filled]
+
+
+#: gammaln lookup for the denominator, covering the usual bin/state counts.
+#: Sized generously; anything beyond falls back to a direct call.
+_GAMMALN_TABLE = gammaln(np.arange(4 * (NUM_BINS + NUM_STATES)))
+
+
+def _log_denominator(length: int, n_states: int) -> float:
+    """gammaln(length + n_states), from the table when it reaches."""
+    index = length + n_states
+    if 0 <= index < _GAMMALN_TABLE.size:
+        return float(_GAMMALN_TABLE[index])
+    return float(gammaln(index))
 
 
 def _log_segment_likelihood(counts: np.ndarray, length: int) -> float:
@@ -183,17 +195,33 @@ def prob_not_segmented(
         # The C++ builds a full total x total matrix but reads only
         # pmat[0][i] (prefix) and pmat[i+1][total-1] (suffix).  Running
         # counts give the same values in O(total * n_states).
+        # sum(gammaln(c_i + 1)) changes by exactly log(c + 1) when one count
+        # goes c -> c + 1, because gammaln(c + 2) - gammaln(c + 1) = log(c + 1).
+        # So the numerator is carried as a running scalar instead of being
+        # recomputed over all n_states categories at every step.
+        log_gamma_states = float(gammaln(n_states))
+
         prefix = np.empty(total - 1, dtype=np.float64)
         running = np.zeros(n_states, dtype=np.float64)
+        numerator = 0.0
         for i in range(total - 1):
-            running[seq[i]] += 1.0
-            prefix[i] = _log_segment_likelihood(running, i + 1)
+            state = seq[i]
+            running[state] += 1.0
+            numerator += math.log(running[state])
+            prefix[i] = (
+                log_gamma_states + numerator - _log_denominator(i + 1, n_states)
+            )
 
         suffix = np.empty(total - 1, dtype=np.float64)
         running = np.zeros(n_states, dtype=np.float64)
+        numerator = 0.0
         for i in range(total - 1, 0, -1):
-            running[seq[i]] += 1.0
-            suffix[i - 1] = _log_segment_likelihood(running, total - i)
+            state = seq[i]
+            running[state] += 1.0
+            numerator += math.log(running[state])
+            suffix[i - 1] = (
+                log_gamma_states + numerator - _log_denominator(total - i, n_states)
+            )
 
         # Flat prior over changepoints, floored at FLT_MIN as in the C++.
         p_a = max(1.0 / (total - 1), float(np.finfo(np.float32).tiny))

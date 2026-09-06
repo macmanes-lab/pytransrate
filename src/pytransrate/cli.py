@@ -41,41 +41,203 @@ ASSEMBLIES_CSV = "assemblies.csv"
 CONTIGS_CSV = "contigs.csv"
 
 
+_EXAMPLES = """
+examples:
+  # sequence metrics only -- no reads, no aligner needed
+  pytransrate -a assembly.fa -o results
+
+  # the full analysis: contig, read-mapping and score metrics
+  pytransrate -a assembly.fa --left r1.fq --right r2.fq -t 16 -o results
+
+  # several assemblies, each into its own subdirectory of results/
+  pytransrate -a one.fa,two.fa --left r1.fq --right r2.fq -o results
+
+  # multiple read files, given as matched comma-separated lists
+  pytransrate -a assembly.fa --left a1.fq,b1.fq --right a2.fq,b2.fq -o results
+
+  # show every external command before it runs
+  pytransrate -a assembly.fa --left r1.fq --right r2.fq -o results --loglevel debug
+
+output:
+  assemblies.csv   assembly-level metrics; score and optimal_score are the
+                   37th and 38th columns
+  contigs.csv      per-contig metrics; score is the 9th column
+  *_score_optimisation.csv
+                   the cutoff/score curve the optimiser walked
+
+Column order in both files is an interface, not presentation -- downstream
+tools read them positionally.
+"""
+
+
+class _HelpFormatter(argparse.RawDescriptionHelpFormatter):
+    """Wider option column, so the grouped flags stay readable."""
+
+    def __init__(self, prog):
+        super().__init__(prog, max_help_position=32)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="transrate",
+        prog="pytransrate",
+        formatter_class=_HelpFormatter,
         description=(
             f"pytransrate: {TAGLINE}.\n\n"
-            "Analyses a de-novo transcriptome assembly using sequence-based "
-            "and read-mapping metrics, scoring how well the assembly is "
-            "supported by the reads it was built from."
+            "Maps the reads back to the assembly, quantifies expression, and\n"
+            "reduces the result to a score per contig and one for the assembly,\n"
+            "measuring how well the assembly is supported by its own reads."
         ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=_EXAMPLES,
     )
-    parser.add_argument(
+
+    required = parser.add_argument_group("required")
+    required.add_argument(
         "-a", "--assembly",
         required=True,
+        metavar="FASTA",
         help="assembly file(s) in FASTA format, comma-separated",
     )
-    parser.add_argument("--left", help="left reads in FASTQ, comma-separated")
-    parser.add_argument("--right", help="right reads in FASTQ, comma-separated")
-    parser.add_argument(
-        "-r", "--reference",
-        help="reference proteome/transcriptome (not implemented in this port)",
+
+    reads = parser.add_argument_group(
+        "reads",
+        "Give both to enable read-mapping metrics and the transrate score.\n"
+        "Without them, only sequence-based metrics are computed.",
     )
-    parser.add_argument(
-        "-t", "--threads", type=int, default=8, help="number of threads"
+    reads.add_argument(
+        "--left", metavar="FASTQ", help="left reads, comma-separated"
     )
-    parser.add_argument(
-        "-o", "--output", default="transrate_results", help="output directory"
+    reads.add_argument(
+        "--right", metavar="FASTQ", help="right reads, comma-separated"
     )
-    parser.add_argument(
+
+    general = parser.add_argument_group("general")
+    general.add_argument(
+        "-o", "--output",
+        default="transrate_results",
+        metavar="DIR",
+        help="output directory (default: transrate_results)",
+    )
+    general.add_argument(
+        "-t", "--threads",
+        type=int,
+        default=8,
+        metavar="N",
+        help="threads to use (default: 8)",
+    )
+    general.add_argument(
         "--loglevel",
         default="info",
         choices=["error", "warn", "info", "debug"],
-        help="logging verbosity",
+        help="logging verbosity (default: info); debug logs every command",
     )
-    parser.add_argument(
+    general.add_argument(
+        "--keep-bam",
+        action="store_true",
+        help="keep the alignment BAM instead of deleting it on success",
+    )
+    general.add_argument(
+        "--no-banner", action="store_true", help="suppress the startup banner"
+    )
+    general.add_argument(
+        "--version", action="version", version=f"pytransrate {__version__}"
+    )
+
+    index = parser.add_argument_group(
+        "snap index tuning",
+        "Only needed when a large or repetitive assembly overflows\nthe index.",
+    )
+    index.add_argument(
+        "--location-size",
+        type=int,
+        choices=range(4, 9),
+        metavar="{4-8}",
+        default=None,
+        help=(
+            "snap -locationSize. Default sweeps 4 up to 8 on overflow; each "
+            "failed attempt is a full index build, so set this if you already "
+            "know the value"
+        ),
+    )
+    index.add_argument(
+        "--seed-size",
+        type=int,
+        default=23,
+        metavar="N",
+        help=(
+            "snap index -s (default: 23). The other fix when an assembly "
+            "overflows at every location size"
+        ),
+    )
+
+    mapping = parser.add_argument_group(
+        "snap mapping tuning",
+        "Defaults are the configuration verified against real assemblies.\n"
+        "The original Ruby's values crash snap 2.x with SIGFPE; see\n"
+        "MULTI_ALIGNMENT_SETTINGS in mapper.py.",
+    )
+    mapping.add_argument(
+        "--multi-edit-distance",
+        type=int,
+        default=2,
+        metavar="N",
+        help=(
+            "snap -om (default: 2): extra edit distance admitted for "
+            "secondary alignments, which is what fragment assignment chooses "
+            "between. Higher values explode on a redundant assembly for "
+            "almost no extra signal"
+        ),
+    )
+    mapping.add_argument(
+        "--max-alignments-per-contig",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "snap -mpc (default: 1), applied before -omax: the best placement "
+            "per candidate contig. 0 disables the cap"
+        ),
+    )
+    mapping.add_argument(
+        "--max-alignments-per-pair",
+        type=int,
+        default=10,
+        metavar="N",
+        help="snap -omax, cap on alignments per pair (default: 10)",
+    )
+    mapping.add_argument(
+        "--extra-search-depth",
+        type=int,
+        default=2,
+        metavar="N",
+        help="snap -D (default: 2). Must be >= --multi-edit-distance",
+    )
+    mapping.add_argument(
+        "--max-seed-hits",
+        type=int,
+        default=4000,
+        metavar="N",
+        help="snap -H (default: 4000, snap's own default; the Ruby used 300000)",
+    )
+    mapping.add_argument(
+        "--edit-distance",
+        type=int,
+        default=30,
+        metavar="N",
+        help="snap -d, max edit distance per pair (default: 30)",
+    )
+    mapping.add_argument(
+        "--max-candidate-pool",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "snap -mcp. Not passed by default: the Ruby's value overflowed "
+            "snap's atoi() into an arbitrary number. Must be under 2147483647"
+        ),
+    )
+
+    quant = parser.add_argument_group("salmon")
+    quant.add_argument(
         "--no-error-model",
         action="store_true",
         help=(
@@ -83,96 +245,15 @@ def build_parser() -> argparse.ArgumentParser:
             "carries AS tags; snap-aligner does not emit them"
         ),
     )
-    parser.add_argument(
-        "--location-size",
-        type=int,
-        choices=range(4, 9),
-        metavar="{4-8}",
-        default=None,
+
+    unsupported = parser.add_argument_group("not implemented")
+    unsupported.add_argument(
+        "-r", "--reference",
+        metavar="FASTA",
         help=(
-            "snap-aligner -locationSize. By default transrate starts at 4 and "
-            "steps up to 8 if the index overflows; set this to go straight to "
-            "a value and skip the failed builds"
+            "reference proteome/transcriptome. Not implemented in this port; "
+            "passing it raises rather than silently changing the output"
         ),
-    )
-    parser.add_argument(
-        "--seed-size",
-        type=int,
-        default=23,
-        help=(
-            "snap-aligner index -s (default 23). Raising it is the other fix "
-            "when an assembly overflows the index at every location size"
-        ),
-    )
-    parser.add_argument(
-        "--max-seed-hits",
-        type=int,
-        default=4000,
-        help=(
-            "snap-aligner paired -H (default 4000, snap's own default; the "
-            "Ruby used 300000). Sizes the scoring candidate pool"
-        ),
-    )
-    parser.add_argument(
-        "--extra-search-depth",
-        type=int,
-        default=2,
-        help="snap-aligner paired -D (default 2). Must be >= --multi-edit-distance",
-    )
-    parser.add_argument(
-        "--multi-edit-distance",
-        type=int,
-        default=2,
-        help=(
-            "snap-aligner paired -om (default 2): extra edit distance admitted "
-            "for secondary alignments. Higher values explode on a redundant "
-            "assembly for almost no extra multi-mapping signal"
-        ),
-    )
-    parser.add_argument(
-        "--max-alignments-per-pair",
-        type=int,
-        default=10,
-        help="snap-aligner paired -omax, cap on alignments per pair (default 10)",
-    )
-    parser.add_argument(
-        "--max-alignments-per-contig",
-        type=int,
-        default=1,
-        help=(
-            "snap-aligner paired -mpc (default 1), applied before -omax: the "
-            "best placement per candidate contig, which is what fragment "
-            "assignment consumes. 0 disables the cap"
-        ),
-    )
-    parser.add_argument(
-        "--edit-distance",
-        type=int,
-        default=30,
-        help="snap-aligner paired -d, max edit distance per pair (default 30)",
-    )
-    parser.add_argument(
-        "--max-candidate-pool",
-        type=int,
-        default=None,
-        help=(
-            "snap-aligner paired -mcp. Not passed by default: the Ruby's "
-            "value (10000000000000) overflows snap's atoi() into an arbitrary "
-            "number, and snap's own default is sane. Must be under 2147483647"
-        ),
-    )
-    parser.add_argument(
-        "--keep-bam",
-        action="store_true",
-        help="keep the alignment BAM instead of deleting it on success",
-    )
-    parser.add_argument(
-        "--no-banner", action="store_true", help="suppress the startup banner"
-    )
-    parser.add_argument(
-        "--version",
-        action="version",
-        version=f"pytransrate {__version__}",
     )
     return parser
 

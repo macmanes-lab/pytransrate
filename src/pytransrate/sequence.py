@@ -146,14 +146,28 @@ def _longest_in_frame(is_start: np.ndarray, is_stop: np.ndarray) -> int:
     best = int(stop_idx[0])
 
     start_idx = np.flatnonzero(is_start)
-    for k in range(stop_idx.size):
-        seg_begin = int(stop_idx[k]) + 1
-        seg_end = int(stop_idx[k + 1]) if k + 1 < stop_idx.size else m
-        # Only the first start in the segment matters; later ones merely
-        # increment an already-open reading frame.
-        p = int(np.searchsorted(start_idx, seg_begin, side="left"))
-        if p < start_idx.size and int(start_idx[p]) < seg_end:
-            best = max(best, seg_end - int(start_idx[p]))
+    if start_idx.size == 0:
+        return best
+
+    # Each stop opens a segment running to the next stop (or the end). Only
+    # the first start inside a segment matters -- later ones just extend an
+    # already-open frame. Resolving all segments with one vectorised
+    # searchsorted rather than one call per stop is the whole cost here:
+    # this runs six times per contig, for every contig.
+    seg_begins = stop_idx + 1
+    seg_ends = np.empty(stop_idx.size, dtype=np.int64)
+    seg_ends[:-1] = stop_idx[1:]
+    seg_ends[-1] = m
+
+    positions = np.searchsorted(start_idx, seg_begins, side="left")
+    in_range = positions < start_idx.size
+    if not in_range.any():
+        return best
+
+    first_starts = start_idx[np.minimum(positions, start_idx.size - 1)]
+    usable = in_range & (first_starts < seg_ends)
+    if usable.any():
+        best = max(best, int((seg_ends[usable] - first_starts[usable]).max()))
     return best
 
 
@@ -182,10 +196,15 @@ def longest_orf(seq) -> int:
         )
 
     rev_start, rev_stop = _classify_codons_reverse(arr)
-    offsets = np.arange(rev_start.size)
     for frame in range(3):
-        # The C indexes len[i%3] with i = j + 2, and walks j downward.
-        sel = offsets[(offsets + 2) % 3 == frame][::-1]
-        longest = max(longest, _longest_in_frame(rev_start[sel], rev_stop[sel]))
+        # The C indexes len[i%3] with i = j + 2 and walks j downward, so this
+        # frame wants offsets j where (j + 2) % 3 == frame, descending. That
+        # is j % 3 == (frame + 1) % 3, which a strided slice gives directly --
+        # no boolean mask and no fancy-index copy per contig per frame.
+        start = (frame + 1) % 3
+        longest = max(
+            longest,
+            _longest_in_frame(rev_start[start::3][::-1], rev_stop[start::3][::-1]),
+        )
 
     return int(longest)

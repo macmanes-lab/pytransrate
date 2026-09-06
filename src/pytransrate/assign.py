@@ -21,11 +21,10 @@ staging a BAM on disk -- removing a write and a re-read that the
 from __future__ import annotations
 
 import math
-from collections import defaultdict
-
 import pysam
 
 __all__ = [
+    "build_prior_tables",
     "DEFAULT_ERROR_RATE",
     "ORPHAN_EDIT_FRACTION",
     "PRIOR_PSEUDOCOUNT",
@@ -122,9 +121,14 @@ def _read_length(read) -> int:
     return read.query_length or read.infer_read_length() or 0
 
 
-def _log_alignment_likelihood(read, error_rate: float) -> float:
-    """Log P(alignment | transcript), from the edit distance."""
-    length = _read_length(read)
+def _log_alignment_likelihood(read, error_rate: float, length: int | None = None) -> float:
+    """Log P(alignment | transcript), from the edit distance.
+
+    ``length`` may be supplied by a caller that has already measured it; the
+    scoring loop does, to avoid asking pysam twice per alignment.
+    """
+    if length is None:
+        length = _read_length(read)
     try:
         nm = int(read.get_tag("NM"))
     except KeyError:
@@ -132,10 +136,40 @@ def _log_alignment_likelihood(read, error_rate: float) -> float:
     return _log_likelihood(nm, length, error_rate)
 
 
+#: Bit per mate: read 1 is 1, read 2 is 2. Cheaper than a set per fragment.
+_MATE_BITS = (0, 1, 1, 2)
+
+
+def build_prior_tables(references, expression=None):
+    """Per-reference prior and log-prior, indexed by reference id.
+
+    Both are loop-invariant across fragments, so they are built once per run
+    rather than per candidate per fragment -- which on a 50M-fragment library
+    is the difference between a handful of lookups and hundreds of millions
+    of string hashes and ``math.log`` calls.
+
+    Returns:
+        ``(priors, log_priors)``, parallel to ``references``.
+    """
+    by_name = {}
+    if expression:
+        for name, values in expression.items():
+            by_name[name] = float(values.get("eff_count", 0.0))
+
+    priors = [0.0] * len(references)
+    log_priors = [0.0] * len(references)
+    for ref_id, name in enumerate(references):
+        prior = by_name.get(name, 0.0) + PRIOR_PSEUDOCOUNT
+        priors[ref_id] = prior
+        log_priors[ref_id] = math.log(prior)
+    return priors, log_priors
+
+
 def score_candidates(
     batch,
     references,
     priors,
+    log_priors=None,
     error_rate: float = DEFAULT_ERROR_RATE,
     orphan_edit_fraction: float = ORPHAN_EDIT_FRACTION,
 ):
@@ -144,7 +178,11 @@ def score_candidates(
     Args:
         batch: the fragment's alignments.
         references: reference names by id.
-        priors: reference name -> expected fragment count.
+        priors: expected fragment counts, indexed by reference id (see
+            :func:`build_prior_tables`). A name-keyed mapping is also
+            accepted, for callers that have not built the tables.
+        log_priors: ``log(prior)`` by reference id. Derived from ``priors``
+            when omitted.
         error_rate: per-base error rate for the likelihood.
         orphan_edit_fraction: mismatch fraction charged for a mate missing
             from a candidate. See ASSIGNMENT_MODEL.
@@ -152,17 +190,35 @@ def score_candidates(
     Returns:
         ``{reference_id: (score, prior, name)}``.
     """
-    by_ref: dict[int, list] = defaultdict(list)
-    mates_present = set()
+    if isinstance(priors, dict):
+        priors, log_priors = build_prior_tables(
+            references,
+            {n: {"eff_count": v} for n, v in priors.items()},
+        )
+    elif log_priors is None:
+        log_priors = [math.log(p) for p in priors]
+
+    # One pass: accumulate each candidate's log-likelihood and which mates it
+    # explains, measuring every read length exactly once.
+    by_ref: dict[int, list] = {}
+    mates = 0
     typical_length = 0
     for read in batch:
         if read.is_unmapped:
             continue
-        by_ref[read.reference_id].append(read)
-        mates_present.add(bool(read.is_read2))
-        typical_length = max(typical_length, _read_length(read))
+        length = _read_length(read)
+        if length > typical_length:
+            typical_length = length
+        bit = 2 if read.is_read2 else 1
+        mates |= bit
 
-    if not mates_present:
+        entry = by_ref.get(read.reference_id)
+        if entry is None:
+            entry = by_ref[read.reference_id] = [0.0, 0]
+        entry[0] += _log_alignment_likelihood(read, error_rate, length)
+        entry[1] |= bit
+
+    if not mates:
         return {}
 
     # Charge a missing mate as a badly-aligned one, so every candidate is
@@ -170,19 +226,16 @@ def score_candidates(
     orphan_cost = _log_likelihood(
         orphan_edit_fraction * typical_length, typical_length, error_rate
     )
+    n_mates = _MATE_BITS[mates]
 
     scored = {}
-    for ref_id, reads in by_ref.items():
-        name = references[ref_id]
-        prior = priors.get(name, 0.0) + PRIOR_PSEUDOCOUNT
-
-        explained = {bool(r.is_read2) for r in reads}
-        score = math.log(prior)
-        for read in reads:
-            score += _log_alignment_likelihood(read, error_rate)
-        score += orphan_cost * len(mates_present - explained)
-
-        scored[ref_id] = (score, prior, name)
+    for ref_id, (log_likelihood, explained) in by_ref.items():
+        score = (
+            log_priors[ref_id]
+            + log_likelihood
+            + orphan_cost * (n_mates - _MATE_BITS[explained])
+        )
+        scored[ref_id] = (score, priors[ref_id], references[ref_id])
     return scored
 
 
@@ -212,14 +265,12 @@ def assign_fragments(
     Yields:
         :class:`pysam.AlignedSegment`, in input order within each fragment.
     """
-    priors = {}
-    if expression:
-        for name, values in expression.items():
-            priors[name] = float(values.get("eff_count", 0.0))
+    priors, log_priors = build_prior_tables(references, expression)
 
     for _name, batch in group_by_fragment(alignments):
         scored = score_candidates(
-            batch, references, priors, error_rate, orphan_edit_fraction
+            batch, references, priors, log_priors,
+            error_rate, orphan_edit_fraction,
         )
         if not scored:
             continue
