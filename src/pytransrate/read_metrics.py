@@ -97,6 +97,11 @@ class ReadMetrics:
         self.contigs_lowcovered = 0
         self.contigs_segmented = 0
 
+        self.alignments = 0
+        self.clipped_alignments = 0
+        self.clipped_bases = 0
+        self.leading_clipped_bases = 0
+
     # -- driving ----------------------------------------------------------
 
     def run(
@@ -137,6 +142,7 @@ class ReadMetrics:
                 nullprior=nullprior,
             )
 
+        self._summarise_clipping(contig_metrics)
         self._populate_contigs(contig_metrics)
         self._analyse_expression(expression)
         self._update_proportions()
@@ -144,6 +150,38 @@ class ReadMetrics:
         return self
 
     # -- aggregation ------------------------------------------------------
+
+    def _summarise_clipping(self, contig_metrics) -> None:
+        """Report soft clipping, which the BAM would otherwise take with it.
+
+        snap 2.x clips reads that hang over a contig end, so those terminal
+        bases lose their support and sCcov falls. That is real, but it is
+        invisible once the BAM is deleted, and it is the first thing anyone
+        comparing scores against the Ruby needs to know.
+        """
+        for metrics in contig_metrics:
+            self.alignments += metrics.reads_mapped
+            self.clipped_alignments += metrics.clipped_alignments
+            self.clipped_bases += metrics.clipped_bases
+            self.leading_clipped_bases += metrics.leading_clipped_bases
+
+        if not self.alignments:
+            return
+
+        fraction = self.clipped_alignments / self.alignments
+        logger.info(
+            "soft-clipped alignments: %d / %d (%.1f%%), %d bases clipped",
+            self.clipped_alignments,
+            self.alignments,
+            100 * fraction,
+            self.clipped_bases,
+        )
+        if self.clipped_alignments:
+            logger.info(
+                "mean soft clip: %.1f bp (%.1f bp leading)",
+                self.clipped_bases / self.clipped_alignments,
+                self.leading_clipped_bases / self.clipped_alignments,
+            )
 
     def _populate_contigs(self, contig_metrics) -> None:
         """Fold per-contig BAM metrics into the assembly's Contig objects."""

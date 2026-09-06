@@ -109,6 +109,13 @@ class ContigMetrics:
     bases_uncovered: int = 0
     p_not_segmented: float = 0.0
 
+    # Soft-clip accounting. Kept because it is the single most useful number
+    # for interpreting sCcov under snap 2.x, and the BAM it comes from is
+    # normally deleted at the end of a run. See SOFT_CLIP_FIX.
+    clipped_alignments: int = 0
+    clipped_bases: int = 0
+    leading_clipped_bases: int = 0
+
     def __post_init__(self):
         if self.coverage is None:
             self.coverage = np.zeros(max(self.length, 0), dtype=np.int32)
@@ -120,7 +127,8 @@ class ContigMetrics:
             return
         pos = read.reference_start
         ref_length = self.coverage.size
-        for op, op_len in cigar:
+        clipped = 0
+        for index, (op, op_len) in enumerate(cigar):
             if op in _COVERING_OPS:
                 end = pos + op_len
                 if pos < ref_length:
@@ -128,7 +136,17 @@ class ContigMetrics:
                 pos = end
             elif op in _SKIPPING_OPS:
                 pos += op_len
-            # I, S consume query only; H, P consume neither. No cursor move.
+            elif op == _CIGAR_SOFT_CLIP:
+                # Consumes query only -- the cursor must not move. Counted
+                # so the run can report how much clipping occurred without
+                # anyone having to keep the BAM.
+                clipped += op_len
+                if index == 0:
+                    self.leading_clipped_bases += op_len
+            # I consumes query only; H, P consume neither. No cursor move.
+        if clipped:
+            self.clipped_alignments += 1
+            self.clipped_bases += clipped
 
     def calculate_uncovered_bases(self) -> None:
         self.bases_uncovered = int(np.count_nonzero(self.coverage == 0))

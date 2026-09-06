@@ -386,3 +386,44 @@ def test_empty_contig_metrics_are_wellformed():
     contig.set_p_not_segmented()
     assert contig.bases_uncovered == 0
     assert 0.0 <= contig.p_not_segmented <= 1.0
+
+
+# ---------------------------------------------------------------------------
+# Soft-clip accounting
+#
+# Reported during the run because the BAM it comes from is deleted by
+# default, and it is what explains a drop in sCcov under snap 2.x.
+# ---------------------------------------------------------------------------
+
+
+def test_soft_clips_are_counted(tmp_path):
+    reads = [
+        _make_read("r1", 0, 50, "20S80M", 100, nm=0),
+        _make_read("r2", 0, 60, "80M20S", 100, nm=0),
+        _make_read("r3", 0, 70, "100M", 100, nm=0),
+    ]
+    bam = _write_bam(tmp_path / "clipstats.bam", reads)
+    by_name = {c.name: c for c in compute_bam_metrics(bam)}
+    contig = by_name["contigA"]
+    assert contig.clipped_alignments == 2
+    assert contig.clipped_bases == 40
+    assert contig.leading_clipped_bases == 20   # only r1 clips at the start
+
+
+def test_unclipped_alignments_count_zero(tmp_path):
+    bam = _write_bam(
+        tmp_path / "noclip2.bam", [_make_read("r", 0, 10, "50M10D40M", 90, nm=0)]
+    )
+    contig = {c.name: c for c in compute_bam_metrics(bam)}["contigA"]
+    assert contig.clipped_alignments == 0
+    assert contig.clipped_bases == 0
+
+
+def test_clip_counting_does_not_disturb_coverage(tmp_path):
+    """The counters must not move the reference cursor."""
+    bam = _write_bam(
+        tmp_path / "clipcov.bam", [_make_read("r", 0, 100, "25S75M", 100, nm=0)]
+    )
+    got = _coverage_by_name(compute_bam_metrics(bam))["contigA"]
+    np.testing.assert_array_equal(got, _samtools_depth(bam)["contigA"])
+    assert int(np.flatnonzero(got)[0]) == 100
