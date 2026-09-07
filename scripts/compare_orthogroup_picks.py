@@ -43,6 +43,10 @@ from collections import Counter
 #: schema change breaks loudly here rather than silently picking a neighbour.
 SCORE_COLUMN = 8
 
+#: Below this share of group members present in a CSV, the comparison is
+#: not measuring selection at all. See COVERAGE_CHECK.
+MIN_MEMBER_COVERAGE = 0.90
+
 #: Groups whose two candidates differ by less than this are near-ties: the
 #: two runs preferred different members of a pair they both consider
 #: essentially equivalent. Well below the 6-decimal rounding of contigs.csv
@@ -175,12 +179,16 @@ def main(argv=None) -> int:
     near_ties = 0
     rows = []
     old_list, new_list = [], []
+    slots = found_old = found_new = 0
 
     for label, members in groups:
         if not members:
             continue
         size = len(members)
         sizes[size] += 1
+        slots += size
+        found_old += sum(1 for m in members if m in old_scores)
+        found_new += sum(1 for m in members if m in new_scores)
 
         old_pick = best_in_group(members, old_scores)
         new_pick = best_in_group(members, new_scores)
@@ -216,6 +224,30 @@ def main(argv=None) -> int:
     print("=" * 70)
     print("ORTHOGROUP REPRESENTATIVE CHANGES")
     print("=" * 70)
+
+    # COVERAGE_CHECK
+    #
+    # Both implementations floor a contig score at 0.01, so any contig
+    # present in either CSV always beats best_in_group's 0.0 threshold. A
+    # group nobody picks from is therefore a group whose members are simply
+    # absent -- never one that scored zero. Absent members make groups
+    # trivially agree, so low coverage reads as perfect reproduction unless
+    # it is checked. The usual cause is scoring the finished assembly, which
+    # holds one contig per group by construction: the one that already won.
+    share_old = found_old / slots if slots else 0.0
+    share_new = found_new / slots if slots else 0.0
+    print(f"  group members                {slots:>10,}")
+    print(f"    found in baseline CSV      {found_old:>10,}   {share_old:>7.2%}")
+    print(f"    found in new CSV           {found_new:>10,}   {share_new:>7.2%}")
+    if min(share_old, share_new) < MIN_MEMBER_COVERAGE:
+        print()
+        print("  *** most group members are missing from the scored assembly ***")
+        print("  Groups whose members are absent cannot change representative, so")
+        print("  the agreement below is measuring nothing. This is what scoring")
+        print("  the finished assembly looks like -- it holds one contig per")
+        print("  orthogroup already, the winner. Score the assembly the picker")
+        print("  actually runs on (merged.fasta) with both implementations.")
+    print()
     print(f"  orthogroups                  {total:>10,}")
     print(f"  both runs picked a contig    {decided:>10,}")
     pct = (lambda n: f"   {n / decided:>7.2%}") if decided else (lambda n: "")
@@ -228,7 +260,7 @@ def main(argv=None) -> int:
     print(f"  only baseline picked         {only_old:>10,}")
     print(f"  only new picked              {only_new:>10,}")
     print(f"  neither picked               {neither:>10,}"
-          "   (every member scored 0 or absent)")
+          "   (no member present in either CSV)")
     print()
 
     if changed:
@@ -249,7 +281,7 @@ def main(argv=None) -> int:
 
     print(f"SUMMARY  groups={total}  decided={decided}  changed={changed}"
           f"  rate={changed / decided if decided else float('nan'):.4f}"
-          f"  near_ties={near_ties}")
+          f"  near_ties={near_ties}  member_coverage={min(share_old, share_new):.4f}")
 
     if args.out_prefix:
         with open(f"{args.out_prefix}.old.list", "w") as handle:
