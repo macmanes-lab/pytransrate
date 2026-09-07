@@ -117,16 +117,26 @@ _INDEX_MARKER = "GenomeIndex"
 #    s75  ( 99,050 contigs)  +0.0031   +0.0036 (116%)   -0.0005 (-16%)
 #
 # (score = geomean(contig scores) * good_mappings/fragments; see score.py.
-# -mpc 0 shown. -mpc 2 lands within 0.0005 of it on all three, so the cap is
-# effectively binary at 1 vs >1 and raising it to 2 buys nothing.)
+# -mpc 0 shown. -mpc 2 lands within 0.0005 of it on all three, so raising the
+# cap to 2 buys nothing. That gap is not quite zero -- -mpc 2 scores 0.0004
+# above -mpc 0 on ORP, same sign across both replicates, ~6x the noise floor
+# below -- but it is an order of magnitude smaller than the jump off -mpc 1,
+# so the cap behaves almost binarily at 1 vs >1.)
 #
-# The effect is real -- the two loosened runs differ from each other by 10-12x
-# less than either differs from the default -- but it points the wrong way.
-# -mpc caps alignments per contig, so it cannot make a previously unalignable
-# fragment align: the set of fragments carrying an alignment is identical
-# across the three runs. fragments_mapped nonetheless rose by 205k-277k, and
-# since it increments once per read-1 record on the assigned contig, the only
-# thing that can move it is one fragment being counted several times.
+# The effect is real. The whole ORP matrix was run twice, giving a replicate
+# at every setting: score reproduces to 2e-5 (8e-5 at -mpc 2), optimal_score
+# to 1e-5, fragments_mapped exactly, and good_mappings to within 1,800 of
+# 24.5M. So the +0.0050 above is 60-250x the run-to-run noise, and the
+# per-contig counts quoted below reproduce to ~0.05% (sCnuc 7749/19690 on the
+# first pass, 7747/19684 on the second). snap's documented nondeterminism
+# (amplab/snap#72) is real but far too small to matter here.
+#
+# But the effect points the wrong way. -mpc caps alignments per contig, so it
+# cannot make a previously unalignable fragment align: the set of fragments
+# carrying an alignment is identical across the three runs. fragments_mapped
+# nonetheless rose by 205k-277k, and since it increments once per read-1
+# record on the assigned contig, the only thing that can move it is one
+# fragment being counted several times.
 # good_mappings and bad_mappings rise together, where a reassignment would
 # trade one for the other, and good_mappings/fragments -- an inflated
 # numerator over a fixed denominator -- carries most or all of the score
