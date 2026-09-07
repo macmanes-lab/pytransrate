@@ -17,6 +17,7 @@ import pysam
 
 from pytransrate.assign import assign_fragments
 from pytransrate.bam_metrics import (
+    MalformedRecordStats,
     accumulate_metrics,
     estimate_realistic_distance,
     iter_alignments,
@@ -133,10 +134,13 @@ class ReadMetrics:
         realistic_distance = estimate_realistic_distance(str(bam_path))
         logger.debug("realistic fragment distance: %d", realistic_distance)
 
+        malformed = MalformedRecordStats()
         with pysam.AlignmentFile(str(bam_path), "rb") as bam:
             references = list(bam.references)
             assigned = assign_fragments(
-                iter_alignments(bam, str(bam_path)), references, expression
+                iter_alignments(bam, str(bam_path), malformed),
+                references,
+                expression,
             )
             contig_metrics = accumulate_metrics(
                 references,
@@ -145,6 +149,9 @@ class ReadMetrics:
                 realistic_distance=realistic_distance,
                 nullprior=nullprior,
             )
+
+        if malformed.skipped:
+            logger.warning("%s", malformed.describe())
 
         self._summarise_clipping(contig_metrics)
         self._populate_contigs(contig_metrics)

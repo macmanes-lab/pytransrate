@@ -17,6 +17,7 @@ The input is expected to carry exactly one alignment per fragment -- the role
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass, field
 
@@ -25,9 +26,12 @@ import pysam
 
 from pytransrate.segmenter import DEFAULT_NULL_PRIOR, bin_coverage, prob_not_segmented
 
+logger = logging.getLogger("transrate")
+
 __all__ = [
     "CSV_COLUMNS",
     "MalformedBamError",
+    "MalformedRecordStats",
     "iter_alignments",
     "ContigMetrics",
     "estimate_realistic_distance",
@@ -93,50 +97,115 @@ _SKIPPING_OPS = frozenset({_CIGAR_DEL, _CIGAR_REF_SKIP})
 
 
 class MalformedBamError(Exception):
-    """The aligner wrote a BAM record htslib will not parse."""
+    """The BAM is unreadable past a record htslib will not parse."""
 
 
 # ---------------------------------------------------------------------------
 # MALFORMED_RECORDS
 #
-# snap-aligner 2.0.5 can emit records whose CIGAR does not match the query
-# sequence length, which htslib rejects mid-iteration:
+# snap-aligner 2.0.5 can emit records whose CIGAR does not consume the whole
+# query, which htslib rejects as it parses them:
 #
 #   [E::bam_read1] CIGAR and query sequence lengths differ for <read>
 #   OSError: error -4 while reading file
 #
-# Observed with -mpc disabled, on the same data and version that dies with
-# SIGFPE under the Ruby's -om/-omax settings. Both faults live in snap's
-# secondary-alignment path; capping alignments per contig (-mpc 1, the
-# default here) avoids them.
+# The cause is alignments at a contig boundary, not the alignment caps. This
+# is snap's oldest and most persistent bug family -- its author's own summary
+# is "related to things that align right against the end of the contig
+# (usually SNAP bugs are)" (snap-user, "CIGAR and query sequence of different
+# length"), amplab/snap#121 reports ~1000 such records per 1M reads against a
+# small reference, and boundary CIGAR fixes appear in the release notes for
+# 2.0.0, 2.0.1, 2.0.2 and again in 2.0.5, the current release ("bugfixes for
+# the case where indels would move the start or end of an alignment beyond a
+# contig boundary"). Residual cases clearly remain.
 #
-# The bare OSError says nothing about the cause, so it is translated. We do
-# not skip the record and continue: htslib aborts the iteration rather than
-# the record, so anything past that point is missing, and silently scoring a
-# truncated BAM would be worse than stopping.
+# That makes it a property of the *assembly*, not of our flags. Measured
+# across one ORP library's assemblies: several complete even with the
+# per-contig cap disabled, while SRR1789336_80Threads.ORP.fasta fails
+# whatever the cap is set to. Loosening -mpc is therefore neither necessary
+# nor sufficient to produce it. (An earlier revision of this comment blamed
+# snap's secondary-alignment path and told users to set -mpc 1, on the
+# strength of a single -mpc 0 run. The cross-assembly comparison falsifies
+# that.)
+#
+# Skipping the record and continuing is safe *for this error*. htslib's
+# bam_read1 reads the record's bytes off the BGZF stream in full and only
+# then checks the CIGAR against l_qseq (htslib sam.c), so the stream is
+# already positioned at the next record when it returns -4. Verified against
+# a hand-built BAM carrying malformed records: every subsequent record reads
+# back correctly.
+#
+# But -4 is also what a truncated or corrupt BAM returns, and there the
+# stream *is* desynchronised, so continuing would be nonsense. The two are
+# indistinguishable from Python -- htslib's reason goes to its own log, not
+# into the exception -- so they are told apart by shape instead: snap's bad
+# records are isolated, corruption is not. MALFORMED_RUN_LIMIT consecutive
+# failures ends the run rather than scoring rubbish.
+#
+# Skipped alignments are lost coverage, so the count is never swallowed: the
+# caller reports it, and the fragments those alignments carried simply go
+# unmapped.
 # ---------------------------------------------------------------------------
 
+#: Consecutive unparseable records taken as corruption rather than snap's
+#: contig-boundary bug. See MALFORMED_RECORDS.
+MALFORMED_RUN_LIMIT = 100
 
-def iter_alignments(bam, path=""):
-    """Iterate a BAM, translating htslib parse failures into advice."""
+
+@dataclass
+class MalformedRecordStats:
+    """How many records htslib refused during one pass over a BAM."""
+
+    skipped: int = 0
+
+    def describe(self) -> str:
+        return (
+            f"{self.skipped} alignment(s) skipped: snap wrote a CIGAR that "
+            "does not match the read length, a known snap-aligner bug at "
+            "contig boundaries. Those fragments count as unmapped"
+        )
+
+
+def iter_alignments(bam, path="", stats=None):
+    """Iterate a BAM, skipping records htslib refuses to parse.
+
+    Args:
+        bam: an open :class:`pysam.AlignmentFile`.
+        path: the BAM's path, quoted in the error if the file turns out to
+            be corrupt rather than merely carrying snap's bad records.
+        stats: optional :class:`MalformedRecordStats` to count skips into.
+            Callers that want to report them must supply one.
+
+    Raises:
+        MalformedBamError: on MALFORMED_RUN_LIMIT consecutive failures, which
+            means the BAM is truncated or corrupt.  See MALFORMED_RECORDS.
+    """
     iterator = bam.fetch(until_eof=True)
+    consecutive = 0
     while True:
         try:
-            yield next(iterator)
+            read = next(iterator)
         except StopIteration:
             return
         except OSError as error:
-            raise MalformedBamError(
-                f"the aligner wrote a BAM record htslib cannot parse{f' in {path}' if path else ''}: "
-                f"{error}\n"
-                "htslib usually reports the offending read just above this "
-                "line, e.g. 'CIGAR and query sequence lengths differ'.\n"
-                "This is a snap-aligner 2.0.5 bug in its secondary-alignment "
-                "path, not a problem with your data. It shows up when the "
-                "per-contig alignment cap is loosened; re-run with "
-                "--max-alignments-per-contig 1 (the default), or raise it to "
-                "2 rather than disabling it."
-            ) from error
+            consecutive += 1
+            if stats is not None:
+                stats.skipped += 1
+            if consecutive >= MALFORMED_RUN_LIMIT:
+                raise MalformedBamError(
+                    f"{MALFORMED_RUN_LIMIT} unreadable records in a row"
+                    f"{f' in {path}' if path else ''}: {error}\n"
+                    "htslib names the reason on the line above, e.g. 'CIGAR "
+                    "and query sequence lengths differ'.\n"
+                    "Isolated records like that are a known snap-aligner "
+                    "bug at contig boundaries and are skipped, but this many "
+                    "together means the BAM is truncated or corrupt -- "
+                    "usually an aligner run that died partway. Delete it and "
+                    "map again."
+                ) from error
+            continue
+        consecutive = 0
+        yield read
 
 
 @dataclass
@@ -283,7 +352,9 @@ def estimate_realistic_distance(
     total = 0
 
     with pysam.AlignmentFile(bam_path, "rb", check_sq=False) as bam:
-        for read in bam.fetch(until_eof=True):
+        # Tolerant iteration: this pass runs before scoring, and a sample of
+        # fragment lengths does not care about a few dropped alignments.
+        for read in iter_alignments(bam, bam_path):
             if count >= limit:
                 break
 
@@ -454,14 +525,18 @@ def compute_bam_metrics(
     if realistic_distance is None:
         realistic_distance = estimate_realistic_distance(bam_path)
 
+    stats = MalformedRecordStats()
     with pysam.AlignmentFile(bam_path, "rb") as bam:
-        return accumulate_metrics(
+        metrics = accumulate_metrics(
             bam.references,
             bam.lengths,
-            iter_alignments(bam, bam_path),
+            iter_alignments(bam, bam_path, stats),
             realistic_distance=realistic_distance,
             nullprior=nullprior,
         )
+    if stats.skipped:
+        logger.warning("%s", stats.describe())
+    return metrics
 
 
 def write_metrics_csv(contigs: list[ContigMetrics], path: str) -> None:

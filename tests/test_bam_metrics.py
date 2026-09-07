@@ -433,18 +433,117 @@ def test_clip_counting_does_not_disturb_coverage(tmp_path):
 # MALFORMED_RECORDS
 # ---------------------------------------------------------------------------
 
+_SEQ_NT16 = {base: code for code, base in enumerate("=ACMGRSVTWYHKDBN")}
 
-def test_htslib_parse_failure_becomes_actionable_advice(tmp_path):
-    """snap 2.0.5 can write records htslib rejects mid-iteration.
 
-    The bare OSError ("error -4 while reading file") names neither the cause
-    nor the fix, so it is translated.
+def _raw_bam_record(name, ref_id, pos, cigar, seq, flag=0, mapq=60):
+    """Encode one BAM record by hand.
+
+    pysam validates on write, so a record with a CIGAR that disagrees with
+    the read length -- the thing snap emits at a contig boundary -- cannot be
+    produced through AlignedSegment.  See MALFORMED_RECORDS.
     """
-    from pytransrate.bam_metrics import MalformedBamError, iter_alignments
+    import struct
 
+    qname = name.encode() + b"\0"
+    packed_cigar = b"".join(struct.pack("<I", (n << 4) | op) for n, op in cigar)
+    packed_seq = bytearray()
+    for i in range(0, len(seq), 2):
+        high = _SEQ_NT16[seq[i]]
+        low = _SEQ_NT16[seq[i + 1]] if i + 1 < len(seq) else 0
+        packed_seq.append(high << 4 | low)
+    core = struct.pack(
+        "<iiBBHHHiiii", ref_id, pos, len(qname), mapq, 4680,
+        len(cigar), flag, len(seq), -1, -1, 0,
+    )
+    body = core + qname + packed_cigar + bytes(packed_seq) + b"\xff" * len(seq)
+    return struct.pack("<i", len(body)) + body
+
+
+def _write_raw_bam(path, records, refs=REFS):
+    """Write a BGZF BAM from hand-encoded records."""
+    import struct
+
+    header = "@HD\tVN:1.6\tSO:unsorted\n" + "".join(
+        f"@SQ\tSN:{name}\tLN:{length}\n" for name, length in refs
+    )
+    out = bytearray(b"BAM\1")
+    out += struct.pack("<i", len(header)) + header.encode()
+    out += struct.pack("<i", len(refs))
+    for name, length in refs:
+        encoded = name.encode() + b"\0"
+        out += struct.pack("<i", len(encoded)) + encoded + struct.pack("<i", length)
+    for record in records:
+        out += record
+
+    plain = str(path) + ".plain"
+    with open(plain, "wb") as handle:
+        handle.write(bytes(out))
+    pysam.tabix_compress(plain, str(path), force=True)
+    return str(path)
+
+
+def test_htslib_resumes_after_a_record_it_refuses(tmp_path):
+    """The load-bearing claim behind skipping: htslib consumes the whole
+    record before it checks the CIGAR, so the stream is already at the next
+    record when it returns -4.  Asserted against real htslib, not a fake.
+    """
+    from pytransrate.bam_metrics import MalformedRecordStats, iter_alignments
+
+    seq = "ACGT" * 25  # 100 bp
+    bam_path = _write_raw_bam(
+        tmp_path / "boundary.bam",
+        [
+            _raw_bam_record("good_1", 0, 10, [(100, 0)], seq),
+            _raw_bam_record("broken", 0, 30, [(90, 0)], seq),      # 90M vs 100 bp
+            _raw_bam_record("good_2", 0, 40, [(10, 4), (90, 0)], seq),
+            _raw_bam_record("broken_2", 0, 60, [(47, 4), (48, 4)], seq),
+            _raw_bam_record("good_3", 0, 70, [(100, 0)], seq),
+        ],
+    )
+
+    stats = MalformedRecordStats()
+    with pysam.AlignmentFile(bam_path, "rb") as bam:
+        names = [read.query_name for read in iter_alignments(bam, bam_path, stats)]
+
+    assert names == ["good_1", "good_2", "good_3"]  # nothing after is lost
+    assert stats.skipped == 2
+
+
+def test_skipped_records_are_reported_not_swallowed():
+    """Skipped alignments are lost coverage, so the count must surface."""
+    from pytransrate.bam_metrics import MalformedRecordStats
+
+    stats = MalformedRecordStats(skipped=7)
+    assert "7 alignment" in stats.describe()
+    assert "unmapped" in stats.describe()
+
+
+def test_a_run_of_unreadable_records_is_corruption_and_stops(tmp_path):
+    """-4 also means truncation, where the stream is desynchronised and
+    continuing would be nonsense.  Told apart by shape: snap's are isolated.
+    """
+    from pytransrate.bam_metrics import (
+        MALFORMED_RUN_LIMIT,
+        MalformedBamError,
+        iter_alignments,
+    )
+
+    # A class, not a generator: pysam's iterator survives raising, which is
+    # the whole reason skipping works.  A generator fake would not.
     class _Bam:
+        calls = 0
+
         def fetch(self, **kwargs):
-            yield "first record"
+            return self
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            self.calls += 1
+            if self.calls == 1:
+                return "first record"
             raise OSError("error -4 while reading file")
 
     seen = []
@@ -452,11 +551,43 @@ def test_htslib_parse_failure_becomes_actionable_advice(tmp_path):
         for read in iter_alignments(_Bam(), "aln.bam"):
             seen.append(read)
 
-    assert seen == ["first record"]          # stops where htslib stopped
+    assert seen == ["first record"]
     message = str(caught.value)
     assert "aln.bam" in message
-    assert "snap-aligner" in message
-    assert "--max-alignments-per-contig" in message
+    assert str(MALFORMED_RUN_LIMIT) in message
+    assert "truncated or corrupt" in message
+
+
+def test_the_run_counter_resets_on_a_good_record():
+    """Scattered bad records must never add up to a corruption verdict."""
+    from pytransrate.bam_metrics import (
+        MALFORMED_RUN_LIMIT,
+        MalformedRecordStats,
+        iter_alignments,
+    )
+
+    class _Bam:
+        index = -1
+
+        def fetch(self, **kwargs):
+            return self
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            self.index += 1
+            if self.index >= MALFORMED_RUN_LIMIT * 3:
+                raise StopIteration
+            if self.index % 2:
+                raise OSError("error -4 while reading file")
+            return f"read_{self.index}"
+
+    stats = MalformedRecordStats()
+    reads = list(iter_alignments(_Bam(), "aln.bam", stats))
+
+    assert len(reads) == MALFORMED_RUN_LIMIT * 3 // 2
+    assert stats.skipped == MALFORMED_RUN_LIMIT * 3 // 2
 
 
 def test_clean_iteration_is_unaffected(tmp_path):
@@ -467,17 +598,3 @@ def test_clean_iteration_is_unaffected(tmp_path):
     )
     with pysam.AlignmentFile(bam_path, "rb") as bam:
         assert len(list(iter_alignments(bam, bam_path))) == 1
-
-
-def test_truncated_bam_is_not_scored_silently(tmp_path):
-    """Stopping beats scoring a partial BAM: htslib aborts the iteration,
-    not just the record, so everything after it would be missing."""
-    from pytransrate.bam_metrics import MalformedBamError, iter_alignments
-
-    class _Bam:
-        def fetch(self, **kwargs):
-            raise OSError("error -4 while reading file")
-            yield
-
-    with pytest.raises(MalformedBamError):
-        list(iter_alignments(_Bam(), "x.bam"))
