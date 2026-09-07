@@ -26,7 +26,7 @@ from pytransrate.segmenter import DEFAULT_NULL_PRIOR
 
 __all__ = ["READ_STATS_KEYS", "ReadMetrics", "get_read_length"]
 
-logger = logging.getLogger("transrate")
+logger = logging.getLogger("pytransrate")
 
 #: Key order of ``ReadMetrics#read_stats``; mirrored in pytransrate.output.
 READ_STATS_KEYS = (

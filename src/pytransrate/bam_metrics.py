@@ -26,7 +26,7 @@ import pysam
 
 from pytransrate.segmenter import DEFAULT_NULL_PRIOR, bin_coverage, prob_not_segmented
 
-logger = logging.getLogger("transrate")
+logger = logging.getLogger("pytransrate")
 
 __all__ = [
     "CSV_COLUMNS",

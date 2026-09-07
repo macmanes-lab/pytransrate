@@ -24,7 +24,7 @@ from pytransrate.cmd import CommandError, run, which
 
 __all__ = ["SnapError", "Snap"]
 
-logger = logging.getLogger("transrate")
+logger = logging.getLogger("pytransrate")
 
 
 class SnapError(CommandError):

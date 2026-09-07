@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 __all__ = ["CommandError", "CommandResult", "run", "which"]
 
-logger = logging.getLogger("transrate")
+logger = logging.getLogger("pytransrate")
 
 
 class CommandError(Exception):

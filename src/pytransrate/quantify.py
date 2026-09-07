@@ -26,7 +26,7 @@ from pytransrate.cmd import CommandError, run, which
 
 __all__ = ["SalmonError", "Salmon", "Expression", "load_expression"]
 
-logger = logging.getLogger("transrate")
+logger = logging.getLogger("pytransrate")
 
 
 class SalmonError(CommandError):

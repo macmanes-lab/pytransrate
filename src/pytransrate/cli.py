@@ -4,7 +4,7 @@ Port of ``lib/transrate/cmdline.rb``.  The option names ORP depends on are
 unchanged -- ``-a/--assembly``, ``-o/--output``, ``-t/--threads``,
 ``--left``, ``--right`` -- so existing invocations keep working:
 
-    transrate -o <dir> -t <cpu> -a <fasta> --left <r1> --right <r2>
+    pytransrate -o <dir> -t <cpu> -a <fasta> --left <r1> --right <r2>
 
 ``--install-deps`` is gone.  It drove the ``bindeps`` gem, which fetched
 binaries from URLs that no longer resolve; snap-aligner and salmon are now
@@ -40,7 +40,7 @@ from pytransrate.quantify import Salmon
 from pytransrate.read_metrics import ReadMetrics, get_read_length
 from pytransrate.score import ScoreOptimiser
 
-logger = logging.getLogger("transrate")
+logger = logging.getLogger("pytransrate")
 
 #: Written into the output directory, as the Ruby did.
 ASSEMBLIES_CSV = "assemblies.csv"
@@ -484,7 +484,7 @@ def invocation(argv=None) -> str:
     Recorded because a log without it cannot be matched to the settings that
     produced it, which is exactly what comparing two runs requires.
     """
-    parts = list(sys.argv) if argv is None else ["transrate", *argv]
+    parts = list(sys.argv) if argv is None else ["pytransrate", *argv]
     return " ".join(shlex.quote(str(part)) for part in parts)
 
 

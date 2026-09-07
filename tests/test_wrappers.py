@@ -742,7 +742,7 @@ def test_the_run_report_goes_to_stdout(capsys):
     root.handlers = []
     try:
         configure_logging("info")
-        logging.getLogger("transrate").info("a metric")
+        logging.getLogger("pytransrate").info("a metric")
     finally:
         for handler in root.handlers:
             handler.close()
@@ -775,7 +775,7 @@ def test_contig_report_is_min_max_and_n50(caplog):
         "n_seqs": 10, "smallest": 201, "largest": 12000, "n_bases": 50000,
         "mean_len": 5000.0, "n50": 9000, "n90": 300, "gc": 0.42,
     }
-    with caplog.at_level(logging.INFO, logger="transrate"):
+    with caplog.at_level(logging.INFO, logger="pytransrate"):
         log_metrics("contig metrics", stats, REPORTED_CONTIG_KEYS)
 
     reported = [record.getMessage() for record in caplog.records]
@@ -794,7 +794,7 @@ def test_mapping_report_covers_every_read_stat(caplog):
     from pytransrate.output import READ_STATS_KEYS
 
     stats = {key: 1 for key in READ_STATS_KEYS}
-    with caplog.at_level(logging.INFO, logger="transrate"):
+    with caplog.at_level(logging.INFO, logger="pytransrate"):
         log_metrics("mapping metrics", stats, READ_STATS_KEYS)
 
     reported = "\n".join(record.getMessage() for record in caplog.records)

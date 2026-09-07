@@ -126,4 +126,4 @@ end to end, with byte-identical scores:
   and raises, so a script using it gets an error rather than silently
   different output.
 
-[2.0.0]: https://github.com/macmanes-lab/transrate/releases/tag/v2.0.0
+[2.0.0]: https://github.com/macmanes-lab/pytransrate/releases/tag/v2.0.0
