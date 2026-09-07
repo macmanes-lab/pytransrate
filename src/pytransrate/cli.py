@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -30,7 +31,11 @@ from pytransrate.bam_metrics import MalformedBamError
 from pytransrate.banner import TAGLINE, print_banner
 from pytransrate.cmd import CommandError
 from pytransrate.mapper import Snap
-from pytransrate.output import write_assemblies_csv, write_contigs_csv
+from pytransrate.output import (
+    READ_STATS_KEYS,
+    write_assemblies_csv,
+    write_contigs_csv,
+)
 from pytransrate.quantify import Salmon
 from pytransrate.read_metrics import ReadMetrics, get_read_length
 from pytransrate.score import ScoreOptimiser
@@ -40,6 +45,28 @@ logger = logging.getLogger("transrate")
 #: Written into the output directory, as the Ruby did.
 ASSEMBLIES_CSV = "assemblies.csv"
 CONTIGS_CSV = "contigs.csv"
+
+# ---------------------------------------------------------------------------
+# REPORTED_METRICS
+#
+# Everything computed goes to assemblies.csv; these are the ones worth
+# reading while a run is in progress or out of a log afterwards. The contig
+# block is deliberately three lines -- min, max and N50 -- because the rest
+# of the length distribution is not what anyone watches a run for, and the
+# CSV has it. The mapping block is complete: it is what changes when the
+# aligner settings change, so leaving any of it out would mean going to the
+# CSV to answer the obvious follow-up question.
+#
+# Values are formatted exactly as write_assemblies_csv rounds them (5 places),
+# so a number read off the log matches the one in the CSV.
+# ---------------------------------------------------------------------------
+
+#: Contig statistics reported at INFO. Keys of ``Assembly.basic_stats()``.
+REPORTED_CONTIG_KEYS = (
+    ("smallest", "min contig length"),
+    ("largest", "max contig length"),
+    ("n50", "N50"),
+)
 
 
 _EXAMPLES = """
@@ -260,11 +287,45 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def configure_logging(level: str) -> None:
+    """Send the whole run report to stdout.
+
+    Diagnostics and results share one stream on purpose: they are read
+    together, out of a single redirected log, and splitting them across
+    stdout and stderr interleaves them unpredictably in that file.
+    """
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format="[%(levelname)5s] %(asctime)s : %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
+        stream=sys.stdout,
     )
+
+
+def format_metric(value) -> str:
+    """Format one metric as write_assemblies_csv would round it."""
+    if isinstance(value, bool) or value is None:
+        return str(value)
+    if isinstance(value, int):
+        return f"{value:,}"
+    if isinstance(value, float):
+        return f"{value:,.5f}"
+    return str(value)
+
+
+def log_metrics(title: str, values: dict, keys) -> None:
+    """Report a labelled block of metrics at INFO. See REPORTED_METRICS."""
+    pairs = []
+    for key in keys:
+        name, label = key if isinstance(key, tuple) else (key, key)
+        if name in values:
+            pairs.append((label, format_metric(values[name])))
+    if not pairs:
+        return
+
+    width = max(len(label) for label, _ in pairs)
+    logger.info("%s:", title)
+    for label, value in pairs:
+        logger.info("  %-*s  %s", width, label, value)
 
 
 def check_arguments(args) -> list[str]:
@@ -323,6 +384,7 @@ def analyse_assembly(assembly_path, args, result_dir: Path) -> dict:
     logger.info("calculating contig metrics...")
     result.update(assembly.basic_stats())
     result.update(assembly.contig_metrics())
+    log_metrics("contig metrics", result, REPORTED_CONTIG_KEYS)
 
     with_reads = bool(args.left and args.right)
     if not with_reads:
@@ -377,6 +439,7 @@ def analyse_assembly(assembly_path, args, result_dir: Path) -> dict:
         read_length=get_read_length(left),
     )
     result.update(read_metrics.read_stats())
+    log_metrics("mapping metrics", result, READ_STATS_KEYS)
 
     optimiser = ScoreOptimiser(
         assembly=assembly,
@@ -413,11 +476,22 @@ def analyse_assembly(assembly_path, args, result_dir: Path) -> dict:
     return result
 
 
+def invocation(argv=None) -> str:
+    """The command line as run, quoted so it can be pasted back.
+
+    Recorded because a log without it cannot be matched to the settings that
+    produced it, which is exactly what comparing two runs requires.
+    """
+    parts = list(sys.argv) if argv is None else ["transrate", *argv]
+    return " ".join(shlex.quote(str(part)) for part in parts)
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(args.loglevel)
     if not args.no_banner:
         print_banner()
+    logger.info("command: %s", invocation(argv))
 
     try:
         assemblies = check_arguments(args)

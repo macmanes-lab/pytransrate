@@ -4,8 +4,9 @@ Keeps the shape of the Ruby's banner -- same figlet font, same coloured
 ``░▓▓▓^▓▓▓░`` flanks -- so the lineage is visible, while the wordmark and
 version make clear this is not the original.
 
-The banner goes to stderr. stdout is left clean for anything a caller might
-want to pipe, and the log stream is already stderr.
+The banner goes to stderr: it is decoration, not data.  The run report --
+every INFO line, including the contig and mapping metric blocks -- goes to
+stdout instead, so redirecting stdout captures the numbers and nothing else.
 """
 
 from __future__ import annotations

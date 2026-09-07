@@ -724,3 +724,89 @@ def test_no_banner_flag_exists():
 
     assert build_parser().parse_args(["-a", "x.fa"]).no_banner is False
     assert build_parser().parse_args(["-a", "x.fa", "--no-banner"]).no_banner
+
+
+# ---------------------------------------------------------------------------
+# REPORTED_METRICS
+# ---------------------------------------------------------------------------
+
+
+def test_the_run_report_goes_to_stdout(capsys):
+    """The banner is decoration and stays on stderr; the numbers are data."""
+    import logging
+
+    from pytransrate.cli import configure_logging
+
+    root = logging.getLogger()
+    saved = root.handlers[:]
+    root.handlers = []
+    try:
+        configure_logging("info")
+        logging.getLogger("transrate").info("a metric")
+    finally:
+        for handler in root.handlers:
+            handler.close()
+        root.handlers = saved
+
+    captured = capsys.readouterr()
+    assert "a metric" in captured.out
+    assert "a metric" not in captured.err
+
+
+def test_the_command_is_recorded_verbatim():
+    """A log that does not say which settings produced it cannot be matched
+    to a run, which is the whole point of comparing runs."""
+    from pytransrate.cli import invocation
+
+    line = invocation(["-a", "asm.fa", "-o", "out dir", "--max-alignments-per-contig", "0"])
+
+    assert "--max-alignments-per-contig 0" in line
+    assert "'out dir'" in line  # quoted, so it pastes back
+
+
+def test_contig_report_is_min_max_and_n50(caplog):
+    """Three lines on purpose: the rest of the length distribution is in the
+    CSV and is not what anyone watches a run for."""
+    import logging
+
+    from pytransrate.cli import REPORTED_CONTIG_KEYS, log_metrics
+
+    stats = {
+        "n_seqs": 10, "smallest": 201, "largest": 12000, "n_bases": 50000,
+        "mean_len": 5000.0, "n50": 9000, "n90": 300, "gc": 0.42,
+    }
+    with caplog.at_level(logging.INFO, logger="transrate"):
+        log_metrics("contig metrics", stats, REPORTED_CONTIG_KEYS)
+
+    reported = [record.getMessage() for record in caplog.records]
+    assert any("min contig length" in line and "201" in line for line in reported)
+    assert any("max contig length" in line and "12,000" in line for line in reported)
+    assert any("N50" in line and "9,000" in line for line in reported)
+    assert not any("n90" in line or "mean_len" in line for line in reported)
+
+
+def test_mapping_report_covers_every_read_stat(caplog):
+    """Complete on purpose: these are what move when the aligner settings
+    move, so omitting any would force a trip to the CSV."""
+    import logging
+
+    from pytransrate.cli import log_metrics
+    from pytransrate.output import READ_STATS_KEYS
+
+    stats = {key: 1 for key in READ_STATS_KEYS}
+    with caplog.at_level(logging.INFO, logger="transrate"):
+        log_metrics("mapping metrics", stats, READ_STATS_KEYS)
+
+    reported = "\n".join(record.getMessage() for record in caplog.records)
+    for key in READ_STATS_KEYS:
+        assert key in reported
+
+
+def test_reported_values_match_the_csv_rounding():
+    """A number read off the log must be the number in assemblies.csv,
+    which write_assemblies_csv rounds to 5 places."""
+    from pytransrate.cli import format_metric
+
+    assert format_metric(0.8624231) == "0.86242"
+    assert format_metric(28976658) == "28,976,658"
+    assert format_metric(0) == "0"
