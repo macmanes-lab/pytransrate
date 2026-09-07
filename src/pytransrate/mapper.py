@@ -106,18 +106,19 @@ _INDEX_MARKER = "GenomeIndex"
 # placements on one. That is what transrate.assign consumes, and it is the
 # precondition accumulate_metrics states in its docstring.
 #
-# MEASURED, after the fact, on SRR1789336 (28,976,658 fragments) against two
-# assemblies at -mpc 1, 2 and 0. Loosening the cap raises the transrate
-# score, and the rise is an artefact of counting rather than a better
-# assembly:
+# MEASURED, after the fact, on SRR1789336 (28,976,658 fragments) against
+# three assemblies at -mpc 1, 2 and 0. Loosening the cap raises the transrate
+# score every time, and the rise is an artefact of counting rather than a
+# better assembly:
 #
 #                             score    from good-rate   from contig geomean
 #    ORP  (101,342 contigs)  +0.0050   +0.0030 ( 60%)   +0.0020 ( 40%)
+#    s55  (124,787 contigs)  +0.0027   +0.0030 (112%)   -0.0003 (-12%)
 #    s75  ( 99,050 contigs)  +0.0031   +0.0036 (116%)   -0.0005 (-16%)
 #
 # (score = geomean(contig scores) * good_mappings/fragments; see score.py.
-# -mpc 0 shown. -mpc 2 lands within 0.0005 of it on both assemblies, so the
-# cap is effectively binary at 1 vs >1 and raising it to 2 buys nothing.)
+# -mpc 0 shown. -mpc 2 lands within 0.0005 of it on all three, so the cap is
+# effectively binary at 1 vs >1 and raising it to 2 buys nothing.)
 #
 # The effect is real -- the two loosened runs differ from each other by 10-12x
 # less than either differs from the default -- but it points the wrong way.
@@ -131,13 +132,24 @@ _INDEX_MARKER = "GenomeIndex"
 # numerator over a fixed denominator -- carries most or all of the score
 # change.
 #
-# The per-contig terms agree. sCnuc falls decisively on both assemblies
-# (s75: 1,832 contigs up against 16,909 down), because the extra placements
-# are worse than the ones already there. sCcov rises, but only where there
-# was uncovered sequence to reclaim: ORP started at 10.8% uncovered bases and
-# gained enough to lift the geomean, s75 started at 1.7% and the accuracy
-# loss showed through undisguised. One artefact, differing only in how much
-# room it had to hide in.
+# The two terms behave nothing alike, which is the tell. The good-rate term
+# is ~+0.003 on all three assemblies, spanning 99k-125k contigs and a 6x
+# range of uncovered bases, and fragments_mapped moves by 0.7-1.0% of the
+# library every time: a property of the reads, not of what they were mapped
+# to. The geomean term swings with the assembly instead, and does so in the
+# order the mechanism predicts -- sCcov can only gain where there was
+# uncovered sequence to reclaim:
+#
+#    ORP  10.8% bases uncovered  ->  sCcov moved on 6.6% of contigs, +0.0020
+#    s55   3.3%                  ->                  1.7%,           -0.0003
+#    s75   1.7%                  ->                  1.2%,           -0.0005
+#
+# So ORP is the exception rather than the pattern: it had enough uncovered
+# sequence for the inflated coverage to lift the geomean. On a normally
+# covered assembly the contigs measurably worsen and the headline score rises
+# anyway. sCnuc falls decisively everywhere (s55: 2,638 contigs up against
+# 16,789 down; s75: 1,832 against 16,909), because the extra placements are
+# worse than the ones already there.
 #
 # A second-order harm comes with it. With -omax 10 fixed, -mpc 1 gives a
 # fragment up to ten alignments across ten distinct contigs; -mpc 0 lets all
