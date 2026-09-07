@@ -27,6 +27,8 @@ from pytransrate.segmenter import DEFAULT_NULL_PRIOR, bin_coverage, prob_not_seg
 
 __all__ = [
     "CSV_COLUMNS",
+    "MalformedBamError",
+    "iter_alignments",
     "ContigMetrics",
     "estimate_realistic_distance",
     "accumulate_metrics",
@@ -88,6 +90,53 @@ _SKIPPING_OPS = frozenset({_CIGAR_DEL, _CIGAR_REF_SKIP})
 # demonstrable defect with an external oracle: `samtools depth -a` agrees with
 # the handling below and disagrees with the C++ on any soft-clipped read.
 # ---------------------------------------------------------------------------
+
+
+class MalformedBamError(Exception):
+    """The aligner wrote a BAM record htslib will not parse."""
+
+
+# ---------------------------------------------------------------------------
+# MALFORMED_RECORDS
+#
+# snap-aligner 2.0.5 can emit records whose CIGAR does not match the query
+# sequence length, which htslib rejects mid-iteration:
+#
+#   [E::bam_read1] CIGAR and query sequence lengths differ for <read>
+#   OSError: error -4 while reading file
+#
+# Observed with -mpc disabled, on the same data and version that dies with
+# SIGFPE under the Ruby's -om/-omax settings. Both faults live in snap's
+# secondary-alignment path; capping alignments per contig (-mpc 1, the
+# default here) avoids them.
+#
+# The bare OSError says nothing about the cause, so it is translated. We do
+# not skip the record and continue: htslib aborts the iteration rather than
+# the record, so anything past that point is missing, and silently scoring a
+# truncated BAM would be worse than stopping.
+# ---------------------------------------------------------------------------
+
+
+def iter_alignments(bam, path=""):
+    """Iterate a BAM, translating htslib parse failures into advice."""
+    iterator = bam.fetch(until_eof=True)
+    while True:
+        try:
+            yield next(iterator)
+        except StopIteration:
+            return
+        except OSError as error:
+            raise MalformedBamError(
+                f"the aligner wrote a BAM record htslib cannot parse{f' in {path}' if path else ''}: "
+                f"{error}\n"
+                "htslib usually reports the offending read just above this "
+                "line, e.g. 'CIGAR and query sequence lengths differ'.\n"
+                "This is a snap-aligner 2.0.5 bug in its secondary-alignment "
+                "path, not a problem with your data. It shows up when the "
+                "per-contig alignment cap is loosened; re-run with "
+                "--max-alignments-per-contig 1 (the default), or raise it to "
+                "2 rather than disabling it."
+            ) from error
 
 
 @dataclass
@@ -409,7 +458,7 @@ def compute_bam_metrics(
         return accumulate_metrics(
             bam.references,
             bam.lengths,
-            bam.fetch(until_eof=True),
+            iter_alignments(bam, bam_path),
             realistic_distance=realistic_distance,
             nullprior=nullprior,
         )

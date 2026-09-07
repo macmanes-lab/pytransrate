@@ -26,6 +26,7 @@ from pathlib import Path
 
 from pytransrate import __version__
 from pytransrate.assembly import Assembly, AssemblyError
+from pytransrate.bam_metrics import MalformedBamError
 from pytransrate.banner import TAGLINE, print_banner
 from pytransrate.cmd import CommandError
 from pytransrate.mapper import Snap
@@ -452,7 +453,7 @@ def main(argv=None) -> int:
             str(outfile),
             with_reads=bool(args.left and args.right),
         )
-    except (CommandError, AssemblyError) as exc:
+    except (CommandError, AssemblyError, MalformedBamError) as exc:
         logger.error("%s", exc)
         return 1
 

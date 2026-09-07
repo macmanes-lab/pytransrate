@@ -427,3 +427,57 @@ def test_clip_counting_does_not_disturb_coverage(tmp_path):
     got = _coverage_by_name(compute_bam_metrics(bam))["contigA"]
     np.testing.assert_array_equal(got, _samtools_depth(bam)["contigA"])
     assert int(np.flatnonzero(got)[0]) == 100
+
+
+# ---------------------------------------------------------------------------
+# MALFORMED_RECORDS
+# ---------------------------------------------------------------------------
+
+
+def test_htslib_parse_failure_becomes_actionable_advice(tmp_path):
+    """snap 2.0.5 can write records htslib rejects mid-iteration.
+
+    The bare OSError ("error -4 while reading file") names neither the cause
+    nor the fix, so it is translated.
+    """
+    from pytransrate.bam_metrics import MalformedBamError, iter_alignments
+
+    class _Bam:
+        def fetch(self, **kwargs):
+            yield "first record"
+            raise OSError("error -4 while reading file")
+
+    seen = []
+    with pytest.raises(MalformedBamError) as caught:
+        for read in iter_alignments(_Bam(), "aln.bam"):
+            seen.append(read)
+
+    assert seen == ["first record"]          # stops where htslib stopped
+    message = str(caught.value)
+    assert "aln.bam" in message
+    assert "snap-aligner" in message
+    assert "--max-alignments-per-contig" in message
+
+
+def test_clean_iteration_is_unaffected(tmp_path):
+    from pytransrate.bam_metrics import iter_alignments
+
+    bam_path = _write_bam(
+        tmp_path / "fine.bam", [_make_read("r", 0, 10, "50M", 50, nm=0)]
+    )
+    with pysam.AlignmentFile(bam_path, "rb") as bam:
+        assert len(list(iter_alignments(bam, bam_path))) == 1
+
+
+def test_truncated_bam_is_not_scored_silently(tmp_path):
+    """Stopping beats scoring a partial BAM: htslib aborts the iteration,
+    not just the record, so everything after it would be missing."""
+    from pytransrate.bam_metrics import MalformedBamError, iter_alignments
+
+    class _Bam:
+        def fetch(self, **kwargs):
+            raise OSError("error -4 while reading file")
+            yield
+
+    with pytest.raises(MalformedBamError):
+        list(iter_alignments(_Bam(), "x.bam"))

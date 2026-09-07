@@ -16,7 +16,11 @@ from collections import OrderedDict
 import pysam
 
 from pytransrate.assign import assign_fragments
-from pytransrate.bam_metrics import accumulate_metrics, estimate_realistic_distance
+from pytransrate.bam_metrics import (
+    accumulate_metrics,
+    estimate_realistic_distance,
+    iter_alignments,
+)
 from pytransrate.segmenter import DEFAULT_NULL_PRIOR
 
 __all__ = ["READ_STATS_KEYS", "ReadMetrics", "get_read_length"]
@@ -132,7 +136,7 @@ class ReadMetrics:
         with pysam.AlignmentFile(str(bam_path), "rb") as bam:
             references = list(bam.references)
             assigned = assign_fragments(
-                bam.fetch(until_eof=True), references, expression
+                iter_alignments(bam, str(bam_path)), references, expression
             )
             contig_metrics = accumulate_metrics(
                 references,
