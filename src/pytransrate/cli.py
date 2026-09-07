@@ -222,7 +222,9 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help=(
             "snap -mpc (default: 1), applied before -omax: the best placement "
-            "per candidate contig. 0 disables the cap"
+            "per candidate contig. 0 disables the cap. Raising it inflates "
+            "the score without improving the assembly -- measured on three "
+            "assemblies, see MULTI_ALIGNMENT_SETTINGS in mapper.py"
         ),
     )
     mapping.add_argument(
