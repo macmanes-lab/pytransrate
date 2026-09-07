@@ -8,6 +8,6 @@ reproduce -- see the module docstrings for where and why behaviour differs.
 Original: https://github.com/blahah/transrate -- see CITATION.md.
 """
 
-__version__ = "2.0.0.dev0"
+__version__ = "2.0.0"
 
 __all__ = ["__version__"]
