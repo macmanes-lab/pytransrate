@@ -103,7 +103,52 @@ _INDEX_MARKER = "GenomeIndex"
 # -mpc 1 is new, and is the right shape for this job independently of the
 # crash: it caps alignments per contig, applied before -omax, so a fragment
 # contributes its best placement on each candidate contig rather than several
-# placements on one. That is exactly what transrate.assign consumes.
+# placements on one. That is what transrate.assign consumes, and it is the
+# precondition accumulate_metrics states in its docstring.
+#
+# MEASURED, after the fact, on SRR1789336 (28,976,658 fragments) against two
+# assemblies at -mpc 1, 2 and 0. Loosening the cap raises the transrate
+# score, and the rise is an artefact of counting rather than a better
+# assembly:
+#
+#                             score    from good-rate   from contig geomean
+#    ORP  (101,342 contigs)  +0.0050   +0.0030 ( 60%)   +0.0020 ( 40%)
+#    s75  ( 99,050 contigs)  +0.0031   +0.0036 (116%)   -0.0005 (-16%)
+#
+# (score = geomean(contig scores) * good_mappings/fragments; see score.py.
+# -mpc 0 shown. -mpc 2 lands within 0.0005 of it on both assemblies, so the
+# cap is effectively binary at 1 vs >1 and raising it to 2 buys nothing.)
+#
+# The effect is real -- the two loosened runs differ from each other by 10-12x
+# less than either differs from the default -- but it points the wrong way.
+# -mpc caps alignments per contig, so it cannot make a previously unalignable
+# fragment align: the set of fragments carrying an alignment is identical
+# across the three runs. fragments_mapped nonetheless rose by 205k-277k, and
+# since it increments once per read-1 record on the assigned contig, the only
+# thing that can move it is one fragment being counted several times.
+# good_mappings and bad_mappings rise together, where a reassignment would
+# trade one for the other, and good_mappings/fragments -- an inflated
+# numerator over a fixed denominator -- carries most or all of the score
+# change.
+#
+# The per-contig terms agree. sCnuc falls decisively on both assemblies
+# (s75: 1,832 contigs up against 16,909 down), because the extra placements
+# are worse than the ones already there. sCcov rises, but only where there
+# was uncovered sequence to reclaim: ORP started at 10.8% uncovered bases and
+# gained enough to lift the geomean, s75 started at 1.7% and the accuracy
+# loss showed through undisguised. One artefact, differing only in how much
+# room it had to hide in.
+#
+# A second-order harm comes with it. With -omax 10 fixed, -mpc 1 gives a
+# fragment up to ten alignments across ten distinct contigs; -mpc 0 lets all
+# ten land on one. Loosening the cap narrows the candidate set the assignment
+# step chooses from rather than widening it.
+#
+# So do not raise this default. Note also that it is not a workaround for the
+# records htslib refuses -- those appear at every setting (0, 1 and 3 skipped
+# at -mpc 1, 2 and 0 on the ORP assembly); see MALFORMED_RECORDS in
+# pytransrate.bam_metrics. scripts/compare_transrate_runs.py reproduces the
+# comparison above from any set of run directories.
 #
 # -H drops to snap's own default of 4000. The Ruby's 300000 was 75x that,
 # with no rationale recorded, and it sizes the scoring candidate pool
