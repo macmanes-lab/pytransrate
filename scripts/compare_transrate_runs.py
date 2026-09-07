@@ -24,6 +24,19 @@ Usage::
 
 Each directory is a transrate ``-o`` output directory holding
 ``assemblies.csv`` and ``contigs.csv``.  One invocation per assembly.
+
+The same shape works for comparing *implementations* -- the Ruby transrate
+ORP ships against this port, say.  Their CSVs carry identical columns in
+identical order, and both round the same way, so nothing extra is needed.
+Read it differently though: the port deliberately does not reproduce the
+Ruby's scores (different aligner, different quantifier, a corrected soft-clip
+cursor, an in-process replacement for salmon's postSample.bam), so the
+question is not whether the numbers moved but whether the *ordering* did.
+Section 5 answers that; ORP keeps the best-scoring member of each orthogroup,
+so ordering is what actually reaches the assembly.
+
+Every comparison also prints one grep-able SUMMARY line, so a sweep over
+several datasets can be reduced to ``... | grep ^SUMMARY``.
 """
 
 from __future__ import annotations
@@ -123,10 +136,34 @@ def column(run: dict, names: list[str], key: str) -> np.ndarray:
 # -- 1. validity ------------------------------------------------------------
 
 
+#: Sequence-only values are compared numerically, not as text. Two
+#: implementations of the same statistic can disagree in the last decimal --
+#: the Ruby transrate computes prop_gc in a C extension, this port in Python
+#: -- and a string comparison would call that a different assembly. Anything
+#: above this is a real difference.
+SEQUENCE_TOLERANCE = 1e-5
+
+
+def values_differ(left: str, right: str) -> tuple[bool, float]:
+    """Compare two CSV cells, numerically where both parse as numbers.
+
+    Returns ``(differs, magnitude)``; magnitude is 0.0 for text comparisons.
+    """
+    if left == right:
+        return False, 0.0
+    a, b = as_float(left), as_float(right)
+    if math.isnan(a) or math.isnan(b):
+        return True, 0.0  # not numeric, and the text already differed
+    delta = abs(a - b)
+    return delta > SEQUENCE_TOLERANCE, delta
+
+
 def check_validity(runs: list[dict], baseline: dict) -> bool:
-    """The runs must differ only in mapping. Anything else invalidates them."""
+    """The runs must have analysed the same assembly. Anything else invalidates
+    the comparison, whether the runs differ by a mapping flag or by which
+    implementation produced them."""
     print("=" * 74)
-    print("1. VALIDITY  (sequence-only outputs must be identical)")
+    print("1. VALIDITY  (sequence-only outputs must match)")
     print("=" * 74)
 
     ok = True
@@ -135,17 +172,23 @@ def check_validity(runs: list[dict], baseline: dict) -> bool:
         if run is baseline:
             continue
         problems = []
+        rounding = []
 
         for key in ASSEMBLY_SEQUENCE_KEYS:
             if key == "assembly":
                 continue  # the path differs by design
-            if key in baseline["assembly"] and (
-                run["assembly"].get(key) != baseline["assembly"].get(key)
-            ):
+            if key not in baseline["assembly"]:
+                continue
+            differs, delta = values_differ(
+                baseline["assembly"].get(key, ""), run["assembly"].get(key, "")
+            )
+            if differs:
                 problems.append(
                     f"assemblies.csv {key}: "
                     f"{baseline['assembly'].get(key)} -> {run['assembly'].get(key)}"
                 )
+            elif delta:
+                rounding.append(f"{key} ({delta:.1e})")
 
         names = set(run["contigs"])
         if names != base_names:
@@ -155,13 +198,21 @@ def check_validity(runs: list[dict], baseline: dict) -> bool:
             )
         else:
             for key in CONTIG_SEQUENCE_KEYS:
-                differing = sum(
-                    1
-                    for name in base_names
-                    if run["contigs"][name][key] != baseline["contigs"][name][key]
-                )
+                differing = 0
+                worst = 0.0
+                for name in base_names:
+                    d, delta = values_differ(
+                        baseline["contigs"][name][key], run["contigs"][name][key]
+                    )
+                    differing += d
+                    worst = max(worst, delta)
                 if differing:
-                    problems.append(f"contigs.csv {key}: {differing} contigs differ")
+                    problems.append(
+                        f"contigs.csv {key}: {differing} contigs differ "
+                        f"(max {worst:.3g})"
+                    )
+                elif worst:
+                    rounding.append(f"{key} (max {worst:.1e})")
 
         if problems:
             ok = False
@@ -170,12 +221,17 @@ def check_validity(runs: list[dict], baseline: dict) -> bool:
                 print(f"          {problem}")
         else:
             print(f"  ok    {run['label']}")
+            if rounding:
+                print(
+                    f"          within tolerance, last-decimal only: "
+                    f"{', '.join(rounding)}"
+                )
 
     if not ok:
         print(
-            "\n  These runs did not analyse the same assembly. Fix that before\n"
-            "  reading anything below -- the score differences are not the\n"
-            "  mapping flags."
+            "\n  These runs did not analyse the same assembly, so the score\n"
+            "  differences below are not what you think they are. Check that\n"
+            "  every run was given the same FASTA."
         )
     print()
     return ok
@@ -240,8 +296,11 @@ def report_assembly_level(runs: list[dict], baseline: dict, replicate: dict | No
             print(line)
     else:
         print()
-        print("  No --replicate given, so there is no noise floor and no way to")
-        print("  tell a real effect from run-to-run variation. Add one.")
+        print("  No --replicate given, so there is no noise floor. Add one when")
+        print("  comparing settings of one implementation, where the effect can")
+        print("  be small enough for variance to matter. Comparing two different")
+        print("  implementations it matters less -- those differences are")
+        print("  structural, and section 5 is the one to read.")
     print()
 
 
@@ -433,6 +492,142 @@ def report_per_contig(runs: list[dict], baseline: dict, replicate: dict | None):
     print()
 
 
+# -- 5. rank agreement ------------------------------------------------------
+
+#: Random contig pairs drawn to estimate rank discordance. The estimate's
+#: standard error is under 0.05 percentage points at this many draws, which
+#: is far finer than any decision anyone makes from it.
+RANK_PAIRS = 2_000_000
+
+
+def rank_discordance(base: np.ndarray, other: np.ndarray, seed: int = 0) -> tuple:
+    """How often the two runs disagree about which of two contigs is better.
+
+    ORP's pick_best_contigs.py takes the highest-scoring member of each
+    orthogroup, so what matters downstream is the *ordering* of contig
+    scores, not their level. This samples random pairs and asks how often
+    the two runs order them oppositely -- directly, how often a two-member
+    orthogroup would change winner.
+
+    Returns ``(discordance, tie_fraction)``. Pairs where either run scores
+    the two contigs equally express no preference and are excluded from the
+    discordance, since neither ordering is a disagreement.
+    """
+    n = base.size
+    if n < 2:
+        return math.nan, math.nan
+    rng = np.random.default_rng(seed)  # fixed: the number must not drift
+    i = rng.integers(0, n, size=RANK_PAIRS)
+    j = rng.integers(0, n, size=RANK_PAIRS)
+    keep = i != j
+    i, j = i[keep], j[keep]
+
+    delta_base = base[i] - base[j]
+    delta_other = other[i] - other[j]
+    decided = (delta_base != 0) & (delta_other != 0)
+    n_decided = int(decided.sum())
+    if not n_decided:
+        return math.nan, 1.0
+    discordant = int(
+        np.sum(np.sign(delta_base[decided]) != np.sign(delta_other[decided]))
+    )
+    return discordant / n_decided, 1.0 - n_decided / delta_base.size
+
+
+def classification(run: dict, names: list) -> np.ndarray | None:
+    """Which contigs the run itself calls good, at its own optimal cutoff."""
+    cutoff = as_float(run["assembly"].get("cutoff"))
+    if math.isnan(cutoff):
+        return None
+    # Contig.classify keeps score >= cutoff; see CUTOFF_BOUNDARY in score.py.
+    return column(run, names, "score") >= cutoff
+
+
+def report_rank_agreement(runs: list[dict], baseline: dict):
+    """Does the ordering survive, and would the same contigs be kept?"""
+    print("=" * 74)
+    print("5. RANK AGREEMENT  (would the same contigs be chosen?)")
+    print("=" * 74)
+    print("  ORP picks the best-scoring member of each orthogroup, so the")
+    print("  ordering of contig scores is what reaches the assembly, not the")
+    print("  scores themselves. Two runs can differ a lot in level and still")
+    print("  make identical choices -- or agree closely and still not.")
+    print()
+
+    names = sorted(set(baseline["contigs"]))
+    if "score" not in next(iter(baseline["contigs"].values())):
+        print("  No contig scores in these runs (no reads).")
+        print()
+        return
+
+    base_scores = column(baseline, names, "score")
+    base_good = classification(baseline, names)
+
+    for run in runs:
+        if run is baseline:
+            continue
+        if set(run["contigs"]) != set(baseline["contigs"]):
+            print(f"  {run['label']}: contig sets differ; skipped (see section 1)")
+            continue
+
+        other = column(run, names, "score")
+        pearson = float(np.corrcoef(base_scores, other)[0, 1])
+        disc, ties = rank_discordance(base_scores, other)
+
+        print(f"  {run['label']}")
+        print(f"    pearson r on contig score      {pearson:.5f}")
+        print(
+            f"    pairs ordered oppositely       {disc:.3%}"
+            f"   (ties, no preference: {ties:.1%})"
+        )
+
+        good = classification(run, names)
+        if base_good is not None and good is not None:
+            both = int(np.sum(base_good & good))
+            neither = int(np.sum(~base_good & ~good))
+            lost = int(np.sum(base_good & ~good))
+            gained = int(np.sum(~base_good & good))
+            total = base_good.size
+            print(
+                f"    good/bad call at each run's own cutoff: "
+                f"{(both + neither) / total:.2%} agree"
+            )
+            print(
+                f"      good in both {both:>7}   bad in both {neither:>7}"
+                f"   only baseline {lost:>6}   only {run['label']} {gained:>6}"
+            )
+        print()
+
+
+def report_summary(runs: list[dict], baseline: dict):
+    """One grep-able line per comparison, for looping over datasets."""
+    names = sorted(set(baseline["contigs"]))
+    has_scores = "score" in next(iter(baseline["contigs"].values()))
+    base_scores = column(baseline, names, "score") if has_scores else None
+    assembly = baseline["assembly"].get("assembly", "?")
+
+    for run in runs:
+        if run is baseline:
+            continue
+        fields = [
+            f"{baseline['label']}->{run['label']}",
+            f"d_score={as_float(run['assembly'].get('score')) - as_float(baseline['assembly'].get('score')):+.5f}",
+        ]
+        if not math.isnan(contig_geomean(baseline)):
+            fields.append(
+                f"d_goodrate={contig_geomean(baseline) * (good_rate(run) - good_rate(baseline)):+.5f}"
+            )
+            fields.append(
+                f"d_geomean={(contig_geomean(run) - contig_geomean(baseline)) * good_rate(baseline):+.5f}"
+            )
+        if has_scores and set(run["contigs"]) == set(baseline["contigs"]):
+            other = column(run, names, "score")
+            disc, _ = rank_discordance(base_scores, other)
+            fields.append(f"pearson={float(np.corrcoef(base_scores, other)[0, 1]):.5f}")
+            fields.append(f"rank_disc={disc:.4f}")
+        print(f"SUMMARY  {assembly}  " + "  ".join(fields))
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -480,6 +675,8 @@ def main(argv=None) -> int:
     report_assembly_level(runs, baseline, replicate)
     report_decomposition(runs, baseline)
     report_per_contig(runs, baseline, replicate)
+    report_rank_agreement(runs, baseline)
+    report_summary(runs, baseline)
     return 0 if valid else 1
 
 
