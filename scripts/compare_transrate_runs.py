@@ -245,7 +245,115 @@ def report_assembly_level(runs: list[dict], baseline: dict, replicate: dict | No
     print()
 
 
-# -- 3. per contig ----------------------------------------------------------
+# -- 3. score decomposition -------------------------------------------------
+
+
+def contig_geomean(run: dict) -> float:
+    """The geometric mean of the contig scores, recovered from the CSV.
+
+    score.py computes the assembly score as
+
+        score = geomean(contig scores) * (good_mappings / fragments)
+
+    and assemblies.csv carries the score and both factors of the rate, so
+    the geomean divides straight back out. Nothing is re-derived from
+    contigs.csv: this is the number the run actually used.
+    """
+    rate = good_rate(run)
+    score = as_float(run["assembly"].get("score"))
+    if not rate or math.isnan(score):
+        return math.nan
+    return score / rate
+
+
+def good_rate(run: dict) -> float:
+    """``good_mappings / fragments``, the second factor of the score."""
+    values = run["assembly"]
+    rate = as_float(values.get("p_good_mapping"))
+    if not math.isnan(rate) and rate:
+        return rate
+    fragments = as_float(values.get("fragments"))
+    if not fragments or math.isnan(fragments):
+        return math.nan
+    return as_float(values.get("good_mappings")) / fragments
+
+
+def report_decomposition(runs: list[dict], baseline: dict):
+    """Split each score delta into its two exact causes.
+
+    A score can rise because the contigs themselves scored better or because
+    a larger share of fragments was called good -- different findings with
+    different consequences, and the product form separates them exactly.
+    """
+    print("=" * 74)
+    print("3. SCORE DECOMPOSITION")
+    print("=" * 74)
+    print("  score = geomean(contig scores) x (good_mappings / fragments)")
+    print()
+
+    if math.isnan(contig_geomean(baseline)):
+        print("  No read metrics in this run, so there is no score to split.")
+        print()
+        return
+
+    print(f"  {'run':<14}{'score':>12}{'contig geomean':>18}{'good/fragments':>18}")
+    print("  " + "-" * 60)
+    for run in runs:
+        print(
+            f"  {run['label']:<14}"
+            f"{as_float(run['assembly']['score']):>12.5f}"
+            f"{contig_geomean(run):>18.5f}"
+            f"{good_rate(run):>18.5f}"
+        )
+
+    others = [run for run in runs if run is not baseline]
+    if not others:
+        print()
+        return
+
+    base_score = as_float(baseline["assembly"]["score"])
+    base_geomean = contig_geomean(baseline)
+    base_rate = good_rate(baseline)
+
+    print()
+    print("  Where each score delta comes from:")
+    print()
+    print(
+        f"  {'run':<14}{'total':>11}{'from good-rate':>22}"
+        f"{'from contig geomean':>24}"
+    )
+    print("  " + "-" * 70)
+    for run in others:
+        total = as_float(run["assembly"]["score"]) - base_score
+        # score = G * r, so the delta splits as G_base*(r - r_base) for the
+        # rate and (G - G_base)*r_base for the contigs, leaving only the
+        # second-order cross term unaccounted for.
+        from_rate = base_geomean * (good_rate(run) - base_rate)
+        from_contigs = (contig_geomean(run) - base_geomean) * base_rate
+        share = (
+            lambda part: f" ({part / total:+.0%})" if abs(total) > 1e-12 else ""
+        )
+        print(
+            f"  {run['label']:<14}{total:>+11.5f}"
+            f"{f'{from_rate:+.5f}{share(from_rate)}':>22}"
+            f"{f'{from_contigs:+.5f}{share(from_contigs)}':>24}"
+        )
+        residual = total - from_rate - from_contigs
+        if abs(total) > 1e-12 and abs(residual) > 0.02 * abs(total):
+            print(
+                f"      unexplained {residual:+.5f} ({residual / total:+.0%}): "
+                "CSV rounding plus the second-order cross term"
+            )
+
+    print()
+    print("  A rise in the good-rate is more fragments being called good; a rise")
+    print("  in the geomean is the contigs themselves scoring better. Read them")
+    print("  against the accuracy components in the next section -- a score that")
+    print("  climbs while sCnuc falls is not the assembly getting better.")
+    print()
+
+
+# -- 4. per contig ----------------------------------------------------------
 
 
 def paired_summary(base: np.ndarray, other: np.ndarray) -> dict:
@@ -290,7 +398,7 @@ def print_summary(label: str, summary: dict):
 
 def report_per_contig(runs: list[dict], baseline: dict, replicate: dict | None):
     print("=" * 74)
-    print("3. PER-CONTIG PAIRED DELTAS  (vs baseline, matched on contig_name)")
+    print("4. PER-CONTIG PAIRED DELTAS  (vs baseline, matched on contig_name)")
     print("=" * 74)
     print("  Every contig is measured under both settings, so these are paired")
     print("  differences, not two independent samples. score is the product of")
@@ -370,6 +478,7 @@ def main(argv=None) -> int:
 
     valid = check_validity(runs, baseline)
     report_assembly_level(runs, baseline, replicate)
+    report_decomposition(runs, baseline)
     report_per_contig(runs, baseline, replicate)
     return 0 if valid else 1
 
