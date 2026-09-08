@@ -22,11 +22,19 @@ from __future__ import annotations
 
 import math
 
+from pytransrate.bam_metrics import (
+    _FLAG_READ2,
+    _FLAG_SECONDARY,
+    _FLAG_UNMAPPED,
+    decode,
+)
+
 __all__ = [
     "build_prior_tables",
     "DEFAULT_ERROR_RATE",
     "ORPHAN_EDIT_FRACTION",
     "PRIOR_PSEUDOCOUNT",
+    "assign_decoded",
     "assign_fragments",
     "group_by_fragment",
     "score_candidates",
@@ -94,6 +102,11 @@ def group_by_fragment(alignments, stride: int = 1, offset: int = 0):
     aligners emit BAMs, and was verified on snap-aligner 2.0.5 output.  A
     coordinate-sorted BAM will silently split fragments apart.
 
+    Records are decoded as they are collected -- the batches are
+    ``(read, flag, reference_id, length, nm)`` tuples, not bare
+    :class:`pysam.AlignedSegment`.  See DECODE_ONCE in
+    :mod:`~pytransrate.bam_metrics`.
+
     Args:
         alignments: read-ordered alignment records.
         stride: keep only every ``stride``-th fragment.  This is how the
@@ -101,7 +114,7 @@ def group_by_fragment(alignments, stride: int = 1, offset: int = 0):
             reads the whole file and takes one residue class.  See STRIDING.
         offset: which residue class to keep, in ``range(stride)``.
 
-    A fragment nobody owns is never collected into a batch, so a worker pays
+    A fragment nobody owns is never collected or decoded, so a worker pays
     only the boundary check for the records it skips.
     """
     current = None
@@ -118,7 +131,7 @@ def group_by_fragment(alignments, stride: int = 1, offset: int = 0):
             owned = index % stride == offset
             batch = []
         if owned:
-            batch.append(read)
+            batch.append(decode(read))
     if owned and batch:
         yield current, batch
 
@@ -131,18 +144,8 @@ def _log_likelihood(nm: float, length: int, error_rate: float) -> float:
     return nm * math.log(error_rate) + (length - nm) * math.log1p(-error_rate)
 
 
-def _read_length(read) -> int:
-    return read.query_length or read.infer_read_length() or 0
-
-
 #: Bit per mate: read 1 is 1, read 2 is 2. Cheaper than a set per fragment.
 _MATE_BITS = (0, 1, 1, 2)
-
-#: SAM FLAG bits this module reads. See the note in ``score_candidates`` on
-#: why the flag is decoded rather than asking pysam for each property.
-_FLAG_UNMAPPED = 0x4
-_FLAG_SECONDARY = 0x100
-_FLAG_READ2 = 0x80
 
 
 def build_prior_tables(references, expression=None):
@@ -181,7 +184,7 @@ def score_candidates(
     """Score each transcript this fragment could have come from.
 
     Args:
-        batch: the fragment's alignments.
+        batch: the fragment's alignments, decoded (DECODE_ONCE).
         references: reference names by id.
         priors: expected fragment counts, indexed by reference id (see
             :func:`build_prior_tables`). A name-keyed mapping is also
@@ -211,36 +214,34 @@ def score_candidates(
     # explains, measuring every read length exactly once.
     #
     # This is the innermost loop of the whole step -- it runs once per
-    # alignment record in the BAM, multi-mappings included -- so it reads the
-    # FLAG once rather than through pysam's named properties, and carries the
-    # body of `_log_likelihood` inline. Both are the same arithmetic that
-    # function states; ASSIGNMENT_MODEL is where it is explained.
+    # alignment record in the BAM, multi-mappings included -- so it works
+    # from fields already decoded (DECODE_ONCE) and carries the body of
+    # `_log_likelihood` inline. The arithmetic is what that function states;
+    # ASSIGNMENT_MODEL is where it is explained.
     by_ref: dict[int, list] = {}
     mates = 0
     typical_length = 0
-    for read in batch:
-        flag = read.flag
+    for _read, flag, reference_id, length, nm in batch:
         if flag & _FLAG_UNMAPPED:
             continue
-        length = _read_length(read)
         if length > typical_length:
             typical_length = length
         bit = 2 if flag & _FLAG_READ2 else 1
         mates |= bit
 
-        entry = by_ref.get(read.reference_id)
+        entry = by_ref.get(reference_id)
         if entry is None:
-            entry = by_ref[read.reference_id] = [0.0, 0]
+            entry = by_ref[reference_id] = [0.0, 0]
         if length > 0:
-            try:
-                nm = read.get_tag("NM")
-            except KeyError:
-                nm = 0
-            if nm < 0:
-                nm = 0
-            elif nm > length:
-                nm = length
-            entry[0] += nm * log_error + (length - nm) * log_match
+            if nm is None:
+                # No NM tag is charged as a perfect alignment, as before.
+                entry[0] += length * log_match
+            else:
+                if nm < 0:
+                    nm = 0
+                elif nm > length:
+                    nm = length
+                entry[0] += nm * log_error + (length - nm) * log_match
         entry[1] |= bit
 
     if not mates:
@@ -296,6 +297,40 @@ def assign_fragments(
     Yields:
         :class:`pysam.AlignedSegment`, in input order within each fragment.
     """
+    for record in assign_decoded(
+        alignments,
+        references,
+        expression,
+        error_rate,
+        orphan_edit_fraction,
+        clear_secondary,
+        stride,
+        offset,
+    ):
+        yield record[0]
+
+
+def assign_decoded(
+    alignments,
+    references,
+    expression=None,
+    error_rate: float = DEFAULT_ERROR_RATE,
+    orphan_edit_fraction: float = ORPHAN_EDIT_FRACTION,
+    clear_secondary: bool = True,
+    stride: int = 1,
+    offset: int = 0,
+):
+    """:func:`assign_fragments`, yielding decoded records rather than reads.
+
+    This is the form the pipeline uses: every field the accumulation stage
+    goes on to want has already been read off the record here, so it is not
+    asked for a second time.  See DECODE_ONCE in
+    :mod:`~pytransrate.bam_metrics`.
+
+    Yields:
+        ``(read, flag, reference_id, length, nm)``, in input order within
+        each fragment.
+    """
     priors, log_priors = build_prior_tables(references, expression)
 
     for _name, batch in group_by_fragment(alignments, stride, offset):
@@ -316,16 +351,19 @@ def assign_fragments(
             ),
         )
 
-        for read in batch:
+        for record in batch:
             # Reference first: on a multi-mapping fragment most records fail
-            # here, and that is one pysam call rather than two. An unmapped
-            # mate can still carry its partner's RNAME, so the flag is
-            # checked as well, not instead.
-            if read.reference_id != best_id:
+            # here, and it is the cheapest of the fields. An unmapped mate can
+            # still carry its partner's RNAME, so the flag is checked as
+            # well, not instead.
+            if record[2] != best_id:
                 continue
-            flag = read.flag
+            flag = record[1]
             if flag & _FLAG_UNMAPPED:
                 continue
             if clear_secondary and flag & _FLAG_SECONDARY:
-                read.flag = flag & ~_FLAG_SECONDARY
-            yield read
+                # The surviving alignment is the fragment's only placement.
+                flag &= ~_FLAG_SECONDARY
+                record[0].flag = flag
+                record = (record[0], flag, record[2], record[3], record[4])
+            yield record

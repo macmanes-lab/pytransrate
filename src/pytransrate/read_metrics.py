@@ -19,11 +19,10 @@ from collections import OrderedDict
 import numpy as np
 import pysam
 
-from pytransrate.assign import assign_fragments
+from pytransrate.assign import assign_decoded
 from pytransrate.bam_metrics import (
     MalformedRecordStats,
     accumulate_into,
-    accumulate_metrics,
     build_contigs,
     counts_buffer_size,
     counts_offsets,
@@ -176,7 +175,7 @@ def _accumulate_stripe(worker_id: int) -> None:
         with pysam.AlignmentFile(bam_path, "rb") as bam:
             accumulate_into(
                 contigs,
-                assign_fragments(
+                assign_decoded(
                     iter_alignments(bam, bam_path, stats),
                     references,
                     state["expression"],
@@ -527,19 +526,18 @@ class ReadMetrics:
                 malformed=malformed,
             )
         else:
+            contig_metrics = build_contigs(references, lengths)
             with pysam.AlignmentFile(str(bam_path), "rb") as bam:
-                assigned = assign_fragments(
-                    iter_alignments(bam, str(bam_path), malformed),
-                    references,
-                    expression,
-                )
-                contig_metrics = accumulate_metrics(
-                    references,
-                    lengths,
-                    assigned,
+                accumulate_into(
+                    contig_metrics,
+                    assign_decoded(
+                        iter_alignments(bam, str(bam_path), malformed),
+                        references,
+                        expression,
+                    ),
                     realistic_distance=realistic_distance,
-                    nullprior=nullprior,
                 )
+            finalise_contigs(contig_metrics, nullprior=nullprior)
 
         if malformed.skipped:
             logger.warning("%s", malformed.describe())

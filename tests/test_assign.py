@@ -18,6 +18,7 @@ from pytransrate.assign import (
     group_by_fragment,
     score_candidates,
 )
+from pytransrate.bam_metrics import decode
 
 REFS = ["txA", "txB"]
 
@@ -44,6 +45,11 @@ def _aln(name, ref_id, start, *, nm=0, read1=True, secondary=False, length=100):
     read.query_qualities = pysam.qualitystring_to_array("I" * length)
     read.set_tag("NM", nm, value_type="i")
     return read
+
+
+def _decoded(reads):
+    """A batch as score_candidates now takes it. See DECODE_ONCE."""
+    return [decode(read) for read in reads]
 
 
 def _expr(**counts):
@@ -86,7 +92,7 @@ def test_better_alignment_wins_at_equal_abundance():
         _aln("f", 1, 10, nm=5, secondary=True),
         _aln("f", 1, 200, nm=5, read1=False, secondary=True),
     ]
-    scored = score_candidates(batch, REFS, {"txA": 10.0, "txB": 10.0})
+    scored = score_candidates(_decoded(batch), REFS, {"txA": 10.0, "txB": 10.0})
     assert scored[0][0] > scored[1][0]
 
 
@@ -96,7 +102,7 @@ def test_higher_abundance_wins_at_equal_alignment_quality():
         _aln("f", 1, 10, nm=2, secondary=True),
         _aln("f", 1, 200, nm=2, read1=False, secondary=True),
     ]
-    scored = score_candidates(batch, REFS, {"txA": 1.0, "txB": 500.0})
+    scored = score_candidates(_decoded(batch), REFS, {"txA": 1.0, "txB": 500.0})
     assert scored[1][0] > scored[0][0]
 
 
@@ -106,7 +112,7 @@ def test_abundance_can_be_outweighed_by_a_much_better_alignment():
         _aln("f", 1, 10, nm=30, secondary=True),
         _aln("f", 1, 200, nm=30, read1=False, secondary=True),
     ]
-    scored = score_candidates(batch, REFS, {"txA": 1.0, "txB": 100.0})
+    scored = score_candidates(_decoded(batch), REFS, {"txA": 1.0, "txB": 100.0})
     assert scored[0][0] > scored[1][0]
 
 
@@ -115,7 +121,7 @@ def test_proper_pair_beats_an_orphan_placement():
         _aln("f", 0, 10, nm=1), _aln("f", 0, 200, nm=1, read1=False),
         _aln("f", 1, 10, nm=0, secondary=True),  # better, but one mate only
     ]
-    scored = score_candidates(batch, REFS, {"txA": 10.0, "txB": 10.0})
+    scored = score_candidates(_decoded(batch), REFS, {"txA": 10.0, "txB": 10.0})
     assert scored[0][0] > scored[1][0]
 
 
@@ -126,7 +132,7 @@ def test_pair_beats_a_perfect_orphan_up_to_the_crossover(nm):
         _aln("f", 0, 10, nm=nm), _aln("f", 0, 200, nm=nm, read1=False),
         _aln("f", 1, 10, nm=0, secondary=True),  # perfect, but one mate only
     ]
-    scored = score_candidates(batch, REFS, {"txA": 10.0, "txB": 10.0})
+    scored = score_candidates(_decoded(batch), REFS, {"txA": 10.0, "txB": 10.0})
     assert scored[0][0] > scored[1][0]
 
 
@@ -138,7 +144,7 @@ def test_badly_diverged_pair_loses_to_a_perfect_orphan(nm):
         _aln("f", 0, 10, nm=nm), _aln("f", 0, 200, nm=nm, read1=False),
         _aln("f", 1, 10, nm=0, secondary=True),
     ]
-    scored = score_candidates(batch, REFS, {"txA": 10.0, "txB": 10.0})
+    scored = score_candidates(_decoded(batch), REFS, {"txA": 10.0, "txB": 10.0})
     assert scored[1][0] > scored[0][0]
 
 
@@ -148,7 +154,7 @@ def test_orphan_charge_cancels_when_no_candidate_has_the_mate():
         _aln("f", 0, 10, nm=4),
         _aln("f", 1, 10, nm=0, secondary=True),
     ]
-    scored = score_candidates(batch, REFS, {"txA": 10.0, "txB": 10.0})
+    scored = score_candidates(_decoded(batch), REFS, {"txA": 10.0, "txB": 10.0})
     assert scored[1][0] > scored[0][0]
 
 
@@ -160,13 +166,13 @@ def test_unmapped_records_are_ignored():
     read = _aln("f", 0, 10)
     read.flag = read.flag | 4
     read.reference_id = -1
-    assert score_candidates([read], REFS, {}) == {}
+    assert score_candidates(_decoded([read]), REFS, {}) == {}
 
 
 def test_transcripts_absent_from_salmon_stay_reachable():
     """The pseudocount keeps zero-abundance transcripts scoreable."""
     batch = [_aln("f", 1, 10, nm=0), _aln("f", 1, 200, nm=0, read1=False)]
-    scored = score_candidates(batch, REFS, {"txA": 99.0})
+    scored = score_candidates(_decoded(batch), REFS, {"txA": 99.0})
     assert 1 in scored
 
 
