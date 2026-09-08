@@ -71,6 +71,19 @@ _COVERING_OPS = frozenset({_CIGAR_MATCH, _CIGAR_EQUAL, _CIGAR_DIFF})
 #: Ops that advance the reference cursor without contributing coverage.
 _SKIPPING_OPS = frozenset({_CIGAR_DEL, _CIGAR_REF_SKIP})
 
+# SAM FLAG bits. The accumulation loop below wants eight of these per record,
+# and pysam's named properties (`is_read1`, `is_proper_pair`, ...) are a
+# separate call into the extension each: reading FLAG once and masking is one
+# call for all eight. The names below are the properties they stand in for.
+_FLAG_PAIRED = 0x1  # is_paired
+_FLAG_PROPER_PAIR = 0x2  # is_proper_pair
+_FLAG_UNMAPPED = 0x4  # is_unmapped
+_FLAG_MATE_UNMAPPED = 0x8  # mate_is_unmapped
+_FLAG_REVERSE = 0x10  # is_reverse
+_FLAG_MATE_REVERSE = 0x20  # mate_is_reverse
+_FLAG_READ1 = 0x40  # is_read1
+_FLAG_READ2 = 0x80  # is_read2
+
 # ---------------------------------------------------------------------------
 # SOFT_CLIP_FIX
 #
@@ -208,8 +221,14 @@ def iter_alignments(bam, path="", stats=None):
     consecutive = 0
     while True:
         try:
-            read = next(iterator)
-        except StopIteration:
+            # The inner loop, rather than next() per record: this runs once
+            # per alignment in the BAM and the builtin call is pure overhead
+            # against FOR_ITER. htslib leaves the stream positioned after a
+            # record it refused (see MALFORMED_RECORDS), so the loop can
+            # simply be re-entered where it broke off.
+            for read in iterator:
+                consecutive = 0
+                yield read
             return
         except OSError as error:
             consecutive += 1
@@ -227,9 +246,6 @@ def iter_alignments(bam, path="", stats=None):
                     "usually an aligner run that died partway. Delete it and "
                     "map again."
                 ) from error
-            continue
-        consecutive = 0
-        yield read
 
 
 @dataclass
@@ -495,31 +511,36 @@ def accumulate_metrics(
     ]
 
     for read in alignments:
-        if read.is_unmapped:
+        # One FLAG read stands in for eight property calls; see the constants.
+        flag = read.flag
+        if flag & _FLAG_UNMAPPED:
             continue
 
         refid = read.reference_id
         contig = contigs[refid]
+        length = _read_length(read)
         contig.reads_mapped += 1
-        contig.bases_mapped += _read_length(read)
+        contig.bases_mapped += length
         contig.add_alignment(read)
 
         # Rescaled per-base sequence accuracy from the edit distance.
         # A read with NM == 35 scores 0; the C++ does not clamp, so
         # heavily-mismatched reads contribute negative values.
-        if read.has_tag("NM"):
-            nm = read.get_tag("NM")
-            length = _read_length(read)
-            if length > 0:
+        if length > 0:
+            try:
+                nm = read.get_tag("NM")
+            except KeyError:
+                nm = None
+            if nm is not None:
                 scale = (length - 35) / length
                 seq_true = (length - nm) / length
                 if scale != 1.0:
                     seq_true = (seq_true - scale) * (1 / (1 - scale))
                 contig.p_seq_true_sum += seq_true
 
-        is_first = read.is_read1
-        is_second = read.is_read2
-        mate_mapped = read.is_paired and not read.mate_is_unmapped
+        is_first = flag & _FLAG_READ1
+        is_second = flag & _FLAG_READ2
+        mate_mapped = flag & _FLAG_PAIRED and not flag & _FLAG_MATE_UNMAPPED
 
         if is_first or (is_second and not mate_mapped):
             contig.fragments_mapped += 1
@@ -530,7 +551,7 @@ def accumulate_metrics(
 
         contig.both_mapped += 1
 
-        if read.is_proper_pair:
+        if flag & _FLAG_PROPER_PAIR:
             contig.properpair += 1
 
         if refid != read.next_reference_id:
@@ -543,10 +564,10 @@ def accumulate_metrics(
             continue
 
         # Expect mates on opposite strands, inner-facing.
-        if not read.is_reverse and read.mate_is_reverse:
+        if not flag & _FLAG_REVERSE and flag & _FLAG_MATE_REVERSE:
             if pos < mate_pos:
                 contig.good += 1
-        elif read.is_reverse and not read.mate_is_reverse:
+        elif flag & _FLAG_REVERSE and not flag & _FLAG_MATE_REVERSE:
             if mate_pos < pos:
                 contig.good += 1
 

@@ -21,7 +21,6 @@ staging a BAM on disk -- removing a write and a re-read that the
 from __future__ import annotations
 
 import math
-import pysam
 
 __all__ = [
     "build_prior_tables",
@@ -121,23 +120,14 @@ def _read_length(read) -> int:
     return read.query_length or read.infer_read_length() or 0
 
 
-def _log_alignment_likelihood(read, error_rate: float, length: int | None = None) -> float:
-    """Log P(alignment | transcript), from the edit distance.
-
-    ``length`` may be supplied by a caller that has already measured it; the
-    scoring loop does, to avoid asking pysam twice per alignment.
-    """
-    if length is None:
-        length = _read_length(read)
-    try:
-        nm = int(read.get_tag("NM"))
-    except KeyError:
-        nm = 0
-    return _log_likelihood(nm, length, error_rate)
-
-
 #: Bit per mate: read 1 is 1, read 2 is 2. Cheaper than a set per fragment.
 _MATE_BITS = (0, 1, 1, 2)
+
+#: SAM FLAG bits this module reads. See the note in ``score_candidates`` on
+#: why the flag is decoded rather than asking pysam for each property.
+_FLAG_UNMAPPED = 0x4
+_FLAG_SECONDARY = 0x100
+_FLAG_READ2 = 0x80
 
 
 def build_prior_tables(references, expression=None):
@@ -198,24 +188,44 @@ def score_candidates(
     elif log_priors is None:
         log_priors = [math.log(p) for p in priors]
 
+    # The two constants of the likelihood, out of the loop below.
+    log_error = math.log(error_rate)
+    log_match = math.log1p(-error_rate)
+
     # One pass: accumulate each candidate's log-likelihood and which mates it
     # explains, measuring every read length exactly once.
+    #
+    # This is the innermost loop of the whole step -- it runs once per
+    # alignment record in the BAM, multi-mappings included -- so it reads the
+    # FLAG once rather than through pysam's named properties, and carries the
+    # body of `_log_likelihood` inline. Both are the same arithmetic that
+    # function states; ASSIGNMENT_MODEL is where it is explained.
     by_ref: dict[int, list] = {}
     mates = 0
     typical_length = 0
     for read in batch:
-        if read.is_unmapped:
+        flag = read.flag
+        if flag & _FLAG_UNMAPPED:
             continue
         length = _read_length(read)
         if length > typical_length:
             typical_length = length
-        bit = 2 if read.is_read2 else 1
+        bit = 2 if flag & _FLAG_READ2 else 1
         mates |= bit
 
         entry = by_ref.get(read.reference_id)
         if entry is None:
             entry = by_ref[read.reference_id] = [0.0, 0]
-        entry[0] += _log_alignment_likelihood(read, error_rate, length)
+        if length > 0:
+            try:
+                nm = read.get_tag("NM")
+            except KeyError:
+                nm = 0
+            if nm < 0:
+                nm = 0
+            elif nm > length:
+                nm = length
+            entry[0] += nm * log_error + (length - nm) * log_match
         entry[1] |= bit
 
     if not mates:
@@ -286,8 +296,15 @@ def assign_fragments(
         )
 
         for read in batch:
-            if read.is_unmapped or read.reference_id != best_id:
+            # Reference first: on a multi-mapping fragment most records fail
+            # here, and that is one pysam call rather than two. An unmapped
+            # mate can still carry its partner's RNAME, so the flag is
+            # checked as well, not instead.
+            if read.reference_id != best_id:
                 continue
-            if clear_secondary and read.is_secondary:
-                read.flag = read.flag & ~pysam.FSECONDARY
+            flag = read.flag
+            if flag & _FLAG_UNMAPPED:
+                continue
+            if clear_secondary and flag & _FLAG_SECONDARY:
+                read.flag = flag & ~_FLAG_SECONDARY
             yield read
