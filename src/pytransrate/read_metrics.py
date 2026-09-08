@@ -26,6 +26,7 @@ from pytransrate.bam_metrics import (
     accumulate_metrics,
     build_contigs,
     counts_buffer_size,
+    counts_offsets,
     estimate_realistic_distance,
     finalise_contigs,
     iter_alignments,
@@ -93,9 +94,22 @@ _READ_LENGTH_SAMPLE = 5000
 # serial path rather than pretending elsewhere.
 # ---------------------------------------------------------------------------
 
-#: Per-contig accumulators the workers merge, in the order the shared scalar
-#: buffer carries them.  Every one is a sum, which is what makes the merge a
-#: single addition.  ``p_seq_true_sum`` is the only float; see PARALLEL_SUM.
+# ---------------------------------------------------------------------------
+# PARALLEL_SUM
+#
+# Every per-contig accumulator is an integer, so merging workers is exact
+# addition and a run gives the same answer at any --threads. That is not
+# automatic: p_seq_true used to be a running float, and float addition is not
+# associative, so dividing a contig's reads between workers moved it by
+# ~1e-15 -- enough, measured, to shift one or two contigs in 20,000 at the
+# sixth decimal that contigs.csv rounds to. EXACT_SEQ_TRUE in bam_metrics is
+# where that was made exact instead, and why the merge below can be a plain
+# integer sum with nothing to say about ordering.
+# ---------------------------------------------------------------------------
+
+#: Per-contig accumulators the workers merge, in the order the shared buffer
+#: carries them.  Every one is an integer sum, which is what makes the merge
+#: a single addition with no rounding to reason about.  See PARALLEL_SUM.
 _MERGED_FIELDS = (
     "reads_mapped",
     "bases_mapped",
@@ -107,36 +121,23 @@ _MERGED_FIELDS = (
     "clipped_alignments",
     "clipped_bases",
     "leading_clipped_bases",
-    "p_seq_true_sum",
+    "scored_alignments",
+    "edit_distance_total",
 )
-
-#: The one accumulator above that is not an integer.
-_FLOAT_FIELDS = frozenset({"p_seq_true_sum"})
-
-# ---------------------------------------------------------------------------
-# PARALLEL_SUM
-#
-# Every merged field is exact except p_seq_true_sum, which is a float sum
-# over a contig's reads. Floating-point addition is not associative, so
-# splitting a contig's reads across workers and adding the partials can
-# differ in the last bits from adding them in BAM order.
-#
-# The merge is therefore done in worker order, which makes a run reproducible
-# for a given --threads. It does not make it reproducible *across* thread
-# counts: p_seq_true can move by ~1e-15 there, and it is a multiplicand of
-# the contig score.
-#
-# That is fixable -- the per-read term simplifies to (35 - nm)/35, so the sum
-# could be carried as two integers and divided once -- but doing so shifts
-# today's numbers by ~1e-12, and this port has been deliberate about when it
-# does that. Left as it is, and measured rather than assumed.
-# ---------------------------------------------------------------------------
 
 #: State handed to workers through the fork rather than through a pickle.
 _WORKER: dict = {}
 
 #: How long to wait on a worker's result before checking whether it is alive.
 _RESULT_POLL_SECONDS = 5.0
+
+#: State for the finalisation pass, handed over the same way as _WORKER.
+_FINALISE: dict = {}
+
+#: Below this many contigs, finalising in the parent beats forking for it.
+#: Finalisation costs ~19us per contig, nearly all of it fixed rather than
+#: proportional to length, against ~10ms to start a process.
+_PARALLEL_FINALISE_MIN_CONTIGS = 5000
 
 
 def _worker_count(threads: int) -> int:
@@ -162,7 +163,7 @@ def _accumulate_stripe(worker_id: int) -> None:
     bam_path = state["bam_path"]
 
     counts = np.frombuffer(state["counts"][worker_id], dtype=np.int32)
-    scalars = np.frombuffer(state["scalars"][worker_id], dtype=np.float64)
+    scalars = np.frombuffer(state["scalars"][worker_id], dtype=np.int64)
     scalars = scalars.reshape(len(_MERGED_FIELDS), len(references))
 
     # Every worker reads every record, so they all meet the same malformed
@@ -293,33 +294,134 @@ def _accumulate_parallel(
             raise error
         malformed.skipped += skipped
 
-    # Sum into the first worker's buffers, then take a private copy: the
-    # contigs below hold views into it, and the mmaps do not outlive this
-    # function. Peak cost is one extra buffer.
+    # Sum every worker's coverage into the first block, in place.
     merged_counts = np.frombuffer(counts_blocks[0], dtype=np.int32)
     for block in counts_blocks[1:]:
         merged_counts += np.frombuffer(block, dtype=np.int32)
-    merged_counts = merged_counts.copy()
 
     shape = (len(_MERGED_FIELDS), n_contigs)
-    merged_scalars = np.frombuffer(scalar_blocks[0], dtype=np.float64).reshape(shape)
+    merged_scalars = np.frombuffer(scalar_blocks[0], dtype=np.int64).reshape(shape)
     for block in scalar_blocks[1:]:
-        merged_scalars += np.frombuffer(block, dtype=np.float64).reshape(shape)
+        merged_scalars += np.frombuffer(block, dtype=np.int64).reshape(shape)
     merged_scalars = merged_scalars.copy()
 
+    # Finalise off the shared merged buffer, before it is copied out of the
+    # mmap: contigs are independent once their coverage is complete, so this
+    # divides the same way the counting did. It integrates in place.
+    finalised = _finalise_parallel(
+        references, lengths, counts_blocks[0], workers, nullprior, context
+    )
+
+    # A private copy, because the contigs returned hold views into it and the
+    # mmaps do not outlive this function.
+    merged_counts = merged_counts.copy()
     for block in counts_blocks + scalar_blocks:
         block.close()
 
-    contigs = build_contigs(references, lengths, merged_counts)
+    contigs = build_contigs(
+        references, lengths, merged_counts, integrated=finalised is not None
+    )
     for row, field in enumerate(_MERGED_FIELDS):
-        values = merged_scalars[row]
-        if field not in _FLOAT_FIELDS:
-            values = values.astype(np.int64)
-        for contig, value in zip(contigs, values.tolist()):
+        for contig, value in zip(contigs, merged_scalars[row].tolist()):
             setattr(contig, field, value)
 
-    finalise_contigs(contigs, nullprior=nullprior)
+    if finalised is None:
+        finalise_contigs(contigs, nullprior=nullprior)
+    else:
+        uncovered, not_segmented = finalised
+        for contig, bases, probability in zip(contigs, uncovered, not_segmented):
+            contig.bases_uncovered = int(bases)
+            contig.p_not_segmented = probability
     return contigs
+
+
+def _finalise_chunk(worker_id: int) -> None:
+    """Integrate and score one contiguous run of contigs, in shared memory."""
+    state = _FINALISE
+    start, stop = state["ranges"][worker_id]
+    error = None
+    try:
+        offsets = state["offsets"]
+        counts = np.frombuffer(state["counts"], dtype=np.int32)
+        out = np.frombuffer(state["out"], dtype=np.float64)
+        out = out.reshape(2, len(state["lengths"]))
+        contigs = build_contigs(
+            state["references"][start:stop],
+            state["lengths"][start:stop],
+            counts[offsets[start] : offsets[stop]],
+        )
+        finalise_contigs(contigs, nullprior=state["nullprior"])
+        for index, contig in enumerate(contigs, start):
+            out[0, index] = contig.bases_uncovered
+            out[1, index] = contig.p_not_segmented
+    except BaseException as exc:
+        error = exc
+    finally:
+        state["results"].put((worker_id, 0, _picklable(error)))
+    if error is not None:
+        raise error
+
+
+def _finalise_parallel(references, lengths, counts, workers, nullprior, context):
+    """Integrate coverage and score segmentation across processes.
+
+    Each worker takes a contiguous range of contigs, so the buffer slices it
+    touches are disjoint from every other worker's and no locking is needed.
+    Ranges are equal in *contig count* rather than in bases: finalisation
+    costs ~19us per contig of which only ~3.5us scales with length, so
+    counting contigs balances the work better than counting bases.
+
+    Returns:
+        ``(bases_uncovered, p_not_segmented)`` arrays, or None when the
+        assembly is too small to be worth forking for -- in which case the
+        buffer is left holding differences for the caller to finalise.
+    """
+    n_contigs = len(references)
+    if workers < 2 or n_contigs < _PARALLEL_FINALISE_MIN_CONTIGS:
+        return None
+
+    edges = [n_contigs * index // workers for index in range(workers + 1)]
+    ranges = [(edges[i], edges[i + 1]) for i in range(workers)]
+    out_block = mmap.mmap(-1, 2 * n_contigs * 8)
+    results_queue = context.Queue()
+    processes = []
+    try:
+        _FINALISE.update(
+            references=references,
+            lengths=lengths,
+            offsets=counts_offsets(lengths),
+            counts=counts,
+            out=out_block,
+            ranges=ranges,
+            nullprior=nullprior,
+            results=results_queue,
+        )
+        processes = [
+            context.Process(target=_finalise_chunk, args=(worker_id,))
+            for worker_id in range(workers)
+        ]
+        for process in processes:
+            process.start()
+        results = _collect(processes, results_queue, 2 * n_contigs * 8)
+        for process in processes:
+            process.join()
+    finally:
+        _FINALISE.clear()
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+        results_queue.close()
+
+    for _worker_id, _skipped, error in results:
+        if error is not None:
+            raise error
+
+    out = np.frombuffer(out_block, dtype=np.float64).reshape(2, n_contigs)
+    uncovered = out[0].astype(np.int64).tolist()
+    not_segmented = out[1].tolist()
+    del out  # an mmap will not close while a view onto it is alive
+    out_block.close()
+    return uncovered, not_segmented
 
 #: Mean coverage below which a contig counts as uncovered / low-covered.
 _UNCOVERED_BELOW = 1

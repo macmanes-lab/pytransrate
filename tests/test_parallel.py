@@ -3,13 +3,14 @@
 The contract is narrow and worth stating plainly: dividing the work must not
 change the answer.  Every integer accumulator and the whole coverage vector
 must come back identical however many workers ran, because all of them are
-exact sums over a partition of the fragments.  ``p_seq_true_sum`` is the one
-exception, and PARALLEL_SUM in pytransrate.read_metrics says why.
+exact sums over a partition of the fragments -- p_seq_true included, since
+EXACT_SEQ_TRUE made its numerator two integers. See PARALLEL_SUM.
 """
 
 from __future__ import annotations
 
 import multiprocessing
+import os
 
 import numpy as np
 import pysam
@@ -22,6 +23,7 @@ from pytransrate.bam_metrics import (
     estimate_realistic_distance,
     iter_alignments,
 )
+from pytransrate import read_metrics
 from pytransrate.read_metrics import _accumulate_parallel, _worker_count
 
 REFS = [("contigA", 600), ("contigB", 500), ("contigC", 400)]
@@ -38,6 +40,8 @@ EXACT_FIELDS = (
     "clipped_alignments",
     "clipped_bases",
     "leading_clipped_bases",
+    "scored_alignments",
+    "edit_distance_total",
     "bases_uncovered",
 )
 
@@ -160,11 +164,11 @@ def test_segmentation_is_bit_identical(tmp_path, workers):
 
 
 @pytest.mark.parametrize("workers", [2, 3, 5])
-def test_p_seq_true_moves_only_in_the_last_bits(tmp_path, workers):
-    """The one float sum. See PARALLEL_SUM."""
+def test_p_seq_true_is_bit_identical(tmp_path, workers):
+    """Exact, not approximate: its numerator is integers. See EXACT_SEQ_TRUE."""
     bam_path = _library(tmp_path)
     for expected, actual in zip(_serial(bam_path), _parallel(bam_path, workers)):
-        assert actual.p_seq_true() == pytest.approx(expected.p_seq_true(), rel=1e-12)
+        assert actual.p_seq_true() == expected.p_seq_true()
 
 
 def test_more_workers_than_fragments(tmp_path):
@@ -182,6 +186,51 @@ def test_a_bam_with_no_alignments(tmp_path):
     for expected, actual in zip(_serial(bam_path), _parallel(bam_path, workers=4)):
         assert actual.reads_mapped == expected.reads_mapped == 0
         assert actual.bases_uncovered == expected.bases_uncovered
+
+
+@pytest.mark.parametrize("workers", [2, 3, 5])
+def test_parallel_finalisation_matches_serial(tmp_path, monkeypatch, workers):
+    """The second pass -- integrate and segment -- divided by contig range.
+
+    The threshold is dropped so a three-contig fixture takes the path a real
+    assembly would; at its normal setting an assembly this small finalises in
+    the parent.
+    """
+    monkeypatch.setattr(read_metrics, "_PARALLEL_FINALISE_MIN_CONTIGS", 1)
+    bam_path = _library(tmp_path)
+    for expected, actual in zip(_serial(bam_path), _parallel(bam_path, workers)):
+        assert actual.bases_uncovered == expected.bases_uncovered
+        assert actual.p_not_segmented == expected.p_not_segmented
+        np.testing.assert_array_equal(
+            np.asarray(actual.coverage), np.asarray(expected.coverage)
+        )
+
+
+def test_finalisation_ranges_cover_every_contig(tmp_path, monkeypatch):
+    """More workers than contigs must still finalise each one exactly once."""
+    monkeypatch.setattr(read_metrics, "_PARALLEL_FINALISE_MIN_CONTIGS", 1)
+    bam_path = _library(tmp_path, n_fragments=9)
+    want = _serial(bam_path)
+    got = _parallel(bam_path, workers=7)
+    assert len(got) == len(REFS)
+    for expected, actual in zip(want, got):
+        assert actual.bases_uncovered == expected.bases_uncovered
+        assert actual.p_not_segmented == expected.p_not_segmented
+
+
+def test_a_failing_finalisation_worker_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(read_metrics, "_PARALLEL_FINALISE_MIN_CONTIGS", 1)
+    parent = os.getpid()
+
+    def boom(contigs, nullprior=0.7):
+        # Names where it ran, so a parent-side fallback cannot pass this off
+        # as the worker path having been exercised.
+        raise ValueError("in the parent" if os.getpid() == parent else "in a worker")
+
+    monkeypatch.setattr(read_metrics, "finalise_contigs", boom)
+    with pytest.raises(ValueError, match="in a worker"):
+        _parallel(_library(tmp_path, n_fragments=5), workers=2)
+    assert read_metrics._FINALISE == {}
 
 
 # ---------------------------------------------------------------------------

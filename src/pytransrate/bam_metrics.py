@@ -39,6 +39,7 @@ __all__ = [
     "accumulate_into",
     "build_contigs",
     "counts_buffer_size",
+    "counts_offsets",
     "finalise_contigs",
     "compute_bam_metrics",
     "write_metrics_csv",
@@ -134,6 +135,38 @@ _FLAG_READ2 = 0x80  # is_read2
 # The buffer is one longer than the contig so a block closing at the last
 # base has somewhere to put its -1; that final entry is always 0 once
 # integrated, since every +1 is matched.
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# EXACT_SEQ_TRUE
+#
+# bam-read accumulated p_seq_true per alignment as
+#
+#     scale     = (length - 35) / length
+#     seq_true  = (length - nm) / length
+#     if scale != 1: seq_true = (seq_true - scale) * 1/(1 - scale)
+#
+# which reduces exactly:
+#
+#     1 - scale = 35/length
+#     seq_true  = ((L-nm)/L - (L-35)/L) * L/35 = (35 - nm)/35
+#
+# The read length cancels. That is why a read with NM == 35 scores 0 -- the
+# property the C++ was reaching for, stated directly. `scale == 1.0` needs
+# 35/length to round to zero, so a read some 1e16 bases long; the branch was
+# unreachable and is gone.
+#
+# So the sum over a contig's alignments is (35*n - sum(nm)) / 35, and both n
+# and sum(nm) are integers. Carrying them instead of a running float makes
+# the total exact: independent of summation order, and therefore identical
+# however many workers the fragments were divided across (see STRIDING in
+# read_metrics). The old form accumulated rounding, so this moves p_seq_true
+# by up to 3.2e-15, measured over 20,000 contigs -- which reaches the sixth
+# decimal contigs.csv rounds to for one contig in that 20,000, and no more.
+#
+# Clamping is still absent, deliberately: the C++ did not clamp, so an
+# alignment with NM > 35 contributes a negative value here as it did there.
 # ---------------------------------------------------------------------------
 
 
@@ -261,7 +294,9 @@ class ContigMetrics:
 
     reads_mapped: int = 0
     bases_mapped: int = 0
-    p_seq_true_sum: float = 0.0
+    # Numerator of p_seq_true, as two integers. See EXACT_SEQ_TRUE.
+    scored_alignments: int = 0
+    edit_distance_total: int = 0
     fragments_mapped: int = 0
     both_mapped: int = 0
     properpair: int = 0
@@ -342,7 +377,12 @@ class ContigMetrics:
 
     def p_seq_true(self) -> float:
         if self.reads_mapped > 0:
-            return self.p_seq_true_sum / self.reads_mapped
+            # sum((35 - nm)/35) / reads_mapped, in one division so that the
+            # result depends only on the two integers. See EXACT_SEQ_TRUE.
+            # Alignments with no NM tag are absent from the numerator but
+            # still counted in reads_mapped, as they were in the C++.
+            scored = 35 * self.scored_alignments - self.edit_distance_total
+            return scored / (35 * self.reads_mapped)
         return 1.0  # bam-read emits a literal 1 for contigs with no reads
 
     def as_row(self) -> dict:
@@ -515,7 +555,7 @@ def accumulate_metrics(
     return contigs
 
 
-def build_contigs(references, lengths, counts=None) -> list:
+def build_contigs(references, lengths, counts=None, integrated=False) -> list:
     """One :class:`ContigMetrics` per reference, in header order.
 
     Args:
@@ -527,6 +567,9 @@ def build_contigs(references, lengths, counts=None) -> list:
             memory here so a worker's coverage can be summed without being
             copied back through a pipe; left out, each contig allocates its
             own as usual.
+        integrated: the buffer already holds per-base counts rather than
+            differences, because someone else integrated it.  See
+            COVERAGE_DIFF.
     """
     contigs = []
     start = 0
@@ -536,8 +579,23 @@ def build_contigs(references, lengths, counts=None) -> list:
             size = contig._counts.size
             contig._counts = counts[start : start + size]
             start += size
+        contig._integrated = integrated
         contigs.append(contig)
     return contigs
+
+
+def counts_offsets(lengths):
+    """Where each contig's slice of a :func:`build_contigs` buffer starts.
+
+    ``n + 1`` entries, so ``offsets[i]:offsets[j]`` is exactly the region
+    contigs ``i`` through ``j - 1`` were carved from -- which is what lets a
+    worker take a contiguous range of contigs out of a shared buffer.
+    """
+    offsets = np.zeros(len(lengths) + 1, dtype=np.int64)
+    np.cumsum(
+        [max(int(length), 0) + 1 for length in lengths], out=offsets[1:]
+    )
+    return offsets
 
 
 def counts_buffer_size(lengths) -> int:
@@ -576,20 +634,15 @@ def accumulate_into(contigs, alignments, realistic_distance: int) -> None:
         contig.bases_mapped += length
         contig.add_alignment(read)
 
-        # Rescaled per-base sequence accuracy from the edit distance.
-        # A read with NM == 35 scores 0; the C++ does not clamp, so
-        # heavily-mismatched reads contribute negative values.
+        # Rescaled per-base sequence accuracy from the edit distance, kept as
+        # the two integers its numerator reduces to. See EXACT_SEQ_TRUE.
         if length > 0:
             try:
-                nm = read.get_tag("NM")
+                contig.edit_distance_total += read.get_tag("NM")
             except KeyError:
-                nm = None
-            if nm is not None:
-                scale = (length - 35) / length
-                seq_true = (length - nm) / length
-                if scale != 1.0:
-                    seq_true = (seq_true - scale) * (1 / (1 - scale))
-                contig.p_seq_true_sum += seq_true
+                pass
+            else:
+                contig.scored_alignments += 1
 
         is_first = flag & _FLAG_READ1
         is_second = flag & _FLAG_READ2
