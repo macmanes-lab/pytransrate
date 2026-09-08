@@ -11,15 +11,23 @@ from __future__ import annotations
 
 import gzip
 import logging
+import mmap
+import multiprocessing
+import queue
 from collections import OrderedDict
 
+import numpy as np
 import pysam
 
 from pytransrate.assign import assign_fragments
 from pytransrate.bam_metrics import (
     MalformedRecordStats,
+    accumulate_into,
     accumulate_metrics,
+    build_contigs,
+    counts_buffer_size,
     estimate_realistic_distance,
+    finalise_contigs,
     iter_alignments,
 )
 from pytransrate.segmenter import DEFAULT_NULL_PRIOR
@@ -51,6 +59,267 @@ READ_STATS_KEYS = (
 
 #: Reads inspected when estimating the maximum read length.
 _READ_LENGTH_SAMPLE = 5000
+
+# ---------------------------------------------------------------------------
+# STRIDING
+#
+# Assignment needs one fragment's records and the priors from quant.sf, and
+# nothing else; fragments are contiguous in a read-ordered BAM. So fragments
+# are independent units of work, and every accumulator they feed is additive
+# -- coverage included, since it is carried as a difference array until it is
+# integrated (COVERAGE_DIFF in bam_metrics). That makes the step separable.
+#
+# It is divided by striding: every worker reads the whole BAM and processes
+# the fragments where `index % workers == worker`. That sounds wasteful, and
+# it is -- each worker pays decompression and a fragment-boundary check on
+# every record, ~0.26us of the ~1.56us a record costs to process. But the
+# obvious alternative buys nothing. An unsorted BAM has no index, so exact
+# byte ranges have to come from a scan that records bam.tell() at fragment
+# boundaries, and that scan costs the same ~0.26us per record serially as
+# striding's redundant decompression costs in parallel. Measured, the two
+# come out level, and striding needs no seeking, no index and no guessing at
+# record boundaries -- which matters in a file format where this module
+# already documents an aligner writing records htslib refuses to parse.
+#
+# So the speedup is bounded by that fixed share, not by the worker count:
+# ~3.7x at 8 workers, ~5.2x at 32, asymptotically ~6x. Beating it needs the
+# parent to scan and dispatch ranges while workers run, which caps at ~6.1x
+# for considerably more machinery, or splitting on BGZF block boundaries,
+# which needs heuristic record-boundary detection. Neither is worth it.
+#
+# Workers write into anonymous mmaps created before the fork, which parent
+# and children share; nothing large is pickled and nothing comes back through
+# a pipe. That is also why this is fork-only, and why it falls back to the
+# serial path rather than pretending elsewhere.
+# ---------------------------------------------------------------------------
+
+#: Per-contig accumulators the workers merge, in the order the shared scalar
+#: buffer carries them.  Every one is a sum, which is what makes the merge a
+#: single addition.  ``p_seq_true_sum`` is the only float; see PARALLEL_SUM.
+_MERGED_FIELDS = (
+    "reads_mapped",
+    "bases_mapped",
+    "fragments_mapped",
+    "both_mapped",
+    "properpair",
+    "bridges",
+    "good",
+    "clipped_alignments",
+    "clipped_bases",
+    "leading_clipped_bases",
+    "p_seq_true_sum",
+)
+
+#: The one accumulator above that is not an integer.
+_FLOAT_FIELDS = frozenset({"p_seq_true_sum"})
+
+# ---------------------------------------------------------------------------
+# PARALLEL_SUM
+#
+# Every merged field is exact except p_seq_true_sum, which is a float sum
+# over a contig's reads. Floating-point addition is not associative, so
+# splitting a contig's reads across workers and adding the partials can
+# differ in the last bits from adding them in BAM order.
+#
+# The merge is therefore done in worker order, which makes a run reproducible
+# for a given --threads. It does not make it reproducible *across* thread
+# counts: p_seq_true can move by ~1e-15 there, and it is a multiplicand of
+# the contig score.
+#
+# That is fixable -- the per-read term simplifies to (35 - nm)/35, so the sum
+# could be carried as two integers and divided once -- but doing so shifts
+# today's numbers by ~1e-12, and this port has been deliberate about when it
+# does that. Left as it is, and measured rather than assumed.
+# ---------------------------------------------------------------------------
+
+#: State handed to workers through the fork rather than through a pickle.
+_WORKER: dict = {}
+
+#: How long to wait on a worker's result before checking whether it is alive.
+_RESULT_POLL_SECONDS = 5.0
+
+
+def _worker_count(threads: int) -> int:
+    """How many processes to actually use for ``--threads N``.
+
+    Falls back to one wherever the fork-and-share scheme does not hold: the
+    shared accumulators are anonymous mmaps inherited across ``fork``, which
+    is Linux and macOS only.
+    """
+    if threads is None or threads < 2:
+        return 1
+    if "fork" not in multiprocessing.get_all_start_methods():
+        logger.info("no fork available; assigning in one process")
+        return 1
+    return int(threads)
+
+
+def _accumulate_stripe(worker_id: int) -> None:
+    """Accumulate this worker's fragments into its shared buffers."""
+    state = _WORKER
+    references = state["references"]
+    lengths = state["lengths"]
+    bam_path = state["bam_path"]
+
+    counts = np.frombuffer(state["counts"][worker_id], dtype=np.int32)
+    scalars = np.frombuffer(state["scalars"][worker_id], dtype=np.float64)
+    scalars = scalars.reshape(len(_MERGED_FIELDS), len(references))
+
+    # Every worker reads every record, so they all meet the same malformed
+    # ones; counting them once keeps the total honest. The run limit still
+    # applies in each worker, so corruption still stops the run.
+    stats = MalformedRecordStats() if worker_id == 0 else None
+    error = None
+    try:
+        contigs = build_contigs(references, lengths, counts)
+        with pysam.AlignmentFile(bam_path, "rb") as bam:
+            accumulate_into(
+                contigs,
+                assign_fragments(
+                    iter_alignments(bam, bam_path, stats),
+                    references,
+                    state["expression"],
+                    stride=state["workers"],
+                    offset=worker_id,
+                ),
+                realistic_distance=state["realistic_distance"],
+            )
+        for row, field in enumerate(_MERGED_FIELDS):
+            scalars[row] = [getattr(contig, field) for contig in contigs]
+    except BaseException as exc:  # reported to the parent, then re-raised
+        error = exc
+    finally:
+        state["results"].put(
+            (worker_id, stats.skipped if stats else 0, _picklable(error))
+        )
+    if error is not None:
+        raise error
+
+
+def _picklable(error):
+    """``error`` if it survives a pipe, else something that says what it was."""
+    if error is None:
+        return None
+    try:
+        import pickle
+
+        pickle.loads(pickle.dumps(error))
+    except Exception:
+        return RuntimeError(f"{type(error).__name__}: {error}")
+    return error
+
+
+def _collect(processes, results_queue, bytes_per_worker: int) -> list:
+    """One result per worker, without hanging on a worker that was killed.
+
+    A worker that dies before it reports -- the OOM killer is the realistic
+    way that happens, since the accumulators are sized by the assembly --
+    would otherwise leave the parent blocked on a queue forever.  Waiting in
+    slices and checking for a dead worker between them turns that into an
+    error that says what to do about it.
+    """
+    results: list = []
+    while len(results) < len(processes):
+        try:
+            results.append(results_queue.get(timeout=_RESULT_POLL_SECONDS))
+        except queue.Empty:
+            dead = [p for p in processes if p.exitcode not in (None, 0)]
+            if dead:
+                raise RuntimeError(
+                    f"an assignment worker died with exit code {dead[0].exitcode} "
+                    "before reporting. The usual cause is the machine running "
+                    f"out of memory, at {bytes_per_worker / 1e9:.1f} GB per "
+                    "worker -- lower --threads"
+                ) from None
+    return results
+
+
+def _accumulate_parallel(
+    bam_path,
+    references,
+    lengths,
+    expression,
+    realistic_distance: int,
+    nullprior: float,
+    workers: int,
+    malformed: MalformedRecordStats,
+):
+    """Assign and accumulate across ``workers`` processes. See STRIDING."""
+    context = multiprocessing.get_context("fork")
+    n_contigs = len(references)
+    counts_bytes = counts_buffer_size(lengths) * 4
+    scalar_bytes = len(_MERGED_FIELDS) * n_contigs * 8
+
+    logger.info(
+        "assigning across %d processes (%.1f GB of shared accumulators)",
+        workers,
+        workers * (counts_bytes + scalar_bytes) / 1e9,
+    )
+
+    counts_blocks = [mmap.mmap(-1, counts_bytes) for _ in range(workers)]
+    scalar_blocks = [mmap.mmap(-1, scalar_bytes) for _ in range(workers)]
+    results_queue = context.Queue()
+    processes = []
+    try:
+        _WORKER.update(
+            bam_path=str(bam_path),
+            references=references,
+            lengths=lengths,
+            expression=expression,
+            realistic_distance=realistic_distance,
+            workers=workers,
+            counts=counts_blocks,
+            scalars=scalar_blocks,
+            results=results_queue,
+        )
+        processes = [
+            context.Process(target=_accumulate_stripe, args=(worker_id,))
+            for worker_id in range(workers)
+        ]
+        for process in processes:
+            process.start()
+        results = _collect(processes, results_queue, counts_bytes + scalar_bytes)
+        for process in processes:
+            process.join()
+    finally:
+        _WORKER.clear()
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+        results_queue.close()
+
+    for _worker_id, skipped, error in results:
+        if error is not None:
+            raise error
+        malformed.skipped += skipped
+
+    # Sum into the first worker's buffers, then take a private copy: the
+    # contigs below hold views into it, and the mmaps do not outlive this
+    # function. Peak cost is one extra buffer.
+    merged_counts = np.frombuffer(counts_blocks[0], dtype=np.int32)
+    for block in counts_blocks[1:]:
+        merged_counts += np.frombuffer(block, dtype=np.int32)
+    merged_counts = merged_counts.copy()
+
+    shape = (len(_MERGED_FIELDS), n_contigs)
+    merged_scalars = np.frombuffer(scalar_blocks[0], dtype=np.float64).reshape(shape)
+    for block in scalar_blocks[1:]:
+        merged_scalars += np.frombuffer(block, dtype=np.float64).reshape(shape)
+    merged_scalars = merged_scalars.copy()
+
+    for block in counts_blocks + scalar_blocks:
+        block.close()
+
+    contigs = build_contigs(references, lengths, merged_counts)
+    for row, field in enumerate(_MERGED_FIELDS):
+        values = merged_scalars[row]
+        if field not in _FLOAT_FIELDS:
+            values = values.astype(np.int64)
+        for contig, value in zip(contigs, values.tolist()):
+            setattr(contig, field, value)
+
+    finalise_contigs(contigs, nullprior=nullprior)
+    return contigs
 
 #: Mean coverage below which a contig counts as uncovered / low-covered.
 _UNCOVERED_BELOW = 1
@@ -116,6 +385,7 @@ class ReadMetrics:
         fragments: int,
         read_length: int | None = None,
         nullprior: float = DEFAULT_NULL_PRIOR,
+        threads: int = 1,
     ) -> "ReadMetrics":
         """Assign fragments, accumulate per-contig metrics, and aggregate.
 
@@ -126,6 +396,9 @@ class ReadMetrics:
             fragments: total fragments in the library, from the aligner.
             read_length: max read length, used for the coverage estimate.
             nullprior: prior handed to the segmenter.
+            threads: processes to divide the fragments across.  See STRIDING
+                for what this does and does not buy; 1 keeps everything in
+                this process.
         """
         self.fragments = fragments
         if read_length:
@@ -135,20 +408,36 @@ class ReadMetrics:
         logger.debug("realistic fragment distance: %d", realistic_distance)
 
         malformed = MalformedRecordStats()
+        workers = _worker_count(threads)
         with pysam.AlignmentFile(str(bam_path), "rb") as bam:
             references = list(bam.references)
-            assigned = assign_fragments(
-                iter_alignments(bam, str(bam_path), malformed),
+            lengths = list(bam.lengths)
+
+        if workers > 1:
+            contig_metrics = _accumulate_parallel(
+                bam_path,
                 references,
+                lengths,
                 expression,
-            )
-            contig_metrics = accumulate_metrics(
-                references,
-                bam.lengths,
-                assigned,
                 realistic_distance=realistic_distance,
                 nullprior=nullprior,
+                workers=workers,
+                malformed=malformed,
             )
+        else:
+            with pysam.AlignmentFile(str(bam_path), "rb") as bam:
+                assigned = assign_fragments(
+                    iter_alignments(bam, str(bam_path), malformed),
+                    references,
+                    expression,
+                )
+                contig_metrics = accumulate_metrics(
+                    references,
+                    lengths,
+                    assigned,
+                    realistic_distance=realistic_distance,
+                    nullprior=nullprior,
+                )
 
         if malformed.skipped:
             logger.warning("%s", malformed.describe())

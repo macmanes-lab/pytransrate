@@ -36,6 +36,10 @@ __all__ = [
     "ContigMetrics",
     "estimate_realistic_distance",
     "accumulate_metrics",
+    "accumulate_into",
+    "build_contigs",
+    "counts_buffer_size",
+    "finalise_contigs",
     "compute_bam_metrics",
     "write_metrics_csv",
 ]
@@ -505,11 +509,60 @@ def accumulate_metrics(
     Returns:
         One :class:`ContigMetrics` per reference, in header order.
     """
-    contigs = [
-        ContigMetrics(name=name, length=length)
-        for name, length in zip(references, lengths)
-    ]
+    contigs = build_contigs(references, lengths)
+    accumulate_into(contigs, alignments, realistic_distance)
+    finalise_contigs(contigs, nullprior=nullprior)
+    return contigs
 
+
+def build_contigs(references, lengths, counts=None) -> list:
+    """One :class:`ContigMetrics` per reference, in header order.
+
+    Args:
+        references: reference names.
+        lengths: reference lengths, parallel to ``references``.
+        counts: optional flat buffer to carve the coverage accumulators out
+            of, ``sum(length + 1)`` entries of int32 (see
+            :func:`counts_buffer_size`).  The parallel driver passes shared
+            memory here so a worker's coverage can be summed without being
+            copied back through a pipe; left out, each contig allocates its
+            own as usual.
+    """
+    contigs = []
+    start = 0
+    for name, length in zip(references, lengths):
+        contig = ContigMetrics(name=name, length=length)
+        if counts is not None:
+            size = contig._counts.size
+            contig._counts = counts[start : start + size]
+            start += size
+        contigs.append(contig)
+    return contigs
+
+
+def counts_buffer_size(lengths) -> int:
+    """Entries a :func:`build_contigs` buffer needs for these lengths."""
+    return int(sum(max(int(length), 0) + 1 for length in lengths))
+
+
+def finalise_contigs(contigs, nullprior: float = DEFAULT_NULL_PRIOR) -> None:
+    """Integrate coverage and derive the per-contig figures from it.
+
+    Split out of :func:`accumulate_metrics` because the parallel driver has
+    to sum every worker's coverage before any of this is meaningful.
+    """
+    for contig in contigs:
+        contig.calculate_uncovered_bases()
+        contig.set_p_not_segmented(nullprior=nullprior)
+
+
+def accumulate_into(contigs, alignments, realistic_distance: int) -> None:
+    """Add a stream of assigned alignments to existing accumulators.
+
+    The counting half of :func:`accumulate_metrics`, without the
+    finalisation, so that several passes -- or several processes -- can
+    contribute to the same figures before they are integrated.
+    """
     for read in alignments:
         # One FLAG read stands in for eight property calls; see the constants.
         flag = read.flag
@@ -571,11 +624,6 @@ def accumulate_metrics(
             if mate_pos < pos:
                 contig.good += 1
 
-    for contig in contigs:
-        contig.calculate_uncovered_bases()
-        contig.set_p_not_segmented(nullprior=nullprior)
-
-    return contigs
 
 
 def compute_bam_metrics(

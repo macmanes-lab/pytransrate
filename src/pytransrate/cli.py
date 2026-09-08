@@ -439,6 +439,7 @@ def analyse_assembly(assembly_path, args, result_dir: Path) -> dict:
         expression,
         fragments=snap.read_count,
         read_length=get_read_length(left),
+        threads=args.threads,
     )
     result.update(read_metrics.read_stats())
     log_metrics("mapping metrics", result, READ_STATS_KEYS)

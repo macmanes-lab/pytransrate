@@ -86,25 +86,40 @@ ORPHAN_EDIT_FRACTION = 0.15
 PRIOR_PSEUDOCOUNT = 1e-3
 
 
-def group_by_fragment(alignments):
+def group_by_fragment(alignments, stride: int = 1, offset: int = 0):
     """Yield ``(name, [alignments])`` for each fragment.
 
     Relies on the BAM being in **read order**, so a fragment's records --
     both mates and every secondary alignment -- are contiguous.  That is how
     aligners emit BAMs, and was verified on snap-aligner 2.0.5 output.  A
     coordinate-sorted BAM will silently split fragments apart.
+
+    Args:
+        alignments: read-ordered alignment records.
+        stride: keep only every ``stride``-th fragment.  This is how the
+            parallel driver divides a BAM that has no index: each worker
+            reads the whole file and takes one residue class.  See STRIDING.
+        offset: which residue class to keep, in ``range(stride)``.
+
+    A fragment nobody owns is never collected into a batch, so a worker pays
+    only the boundary check for the records it skips.
     """
     current = None
+    owned = stride == 1
+    index = -1
     batch: list = []
     for read in alignments:
         name = read.query_name
         if name != current:
-            if batch:
+            if owned and batch:
                 yield current, batch
             current = name
+            index += 1
+            owned = index % stride == offset
             batch = []
-        batch.append(read)
-    if batch:
+        if owned:
+            batch.append(read)
+    if owned and batch:
         yield current, batch
 
 
@@ -256,6 +271,8 @@ def assign_fragments(
     error_rate: float = DEFAULT_ERROR_RATE,
     orphan_edit_fraction: float = ORPHAN_EDIT_FRACTION,
     clear_secondary: bool = True,
+    stride: int = 1,
+    offset: int = 0,
 ):
     """Yield one transcript's worth of alignments per fragment.
 
@@ -271,13 +288,17 @@ def assign_fragments(
             from a candidate.
         clear_secondary: unset the secondary flag on emitted records, since
             the surviving alignment is now the fragment's only placement.
+        stride: process only every ``stride``-th fragment, and
+        offset: starting at this one.  Assignment reads nothing outside the
+            fragment and the priors, so a stride is a complete unit of work.
+            See :func:`group_by_fragment` and STRIDING.
 
     Yields:
         :class:`pysam.AlignedSegment`, in input order within each fragment.
     """
     priors, log_priors = build_prior_tables(references, expression)
 
-    for _name, batch in group_by_fragment(alignments):
+    for _name, batch in group_by_fragment(alignments, stride, offset):
         scored = score_candidates(
             batch, references, priors, log_priors,
             error_rate, orphan_edit_fraction,
