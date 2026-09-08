@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 import pysam
@@ -93,6 +93,30 @@ _SKIPPING_OPS = frozenset({_CIGAR_DEL, _CIGAR_REF_SKIP})
 # We follow the spec.  Unlike the segmenter's binning quirk this is a
 # demonstrable defect with an external oracle: `samtools depth -a` agrees with
 # the handling below and disagrees with the C++ on any soft-clipped read.
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# COVERAGE_DIFF
+#
+# Coverage is accumulated as a difference array -- +1 where an aligned block
+# opens, -1 where it closes -- and integrated once per contig at the end,
+# rather than incrementing a slice per aligned block.
+#
+# The slice form costs O(span) per block and, worse, pays numpy's per-call
+# overhead on a ~100-element slice: measured over one library's alignments it
+# was 0.555 us each against 0.311 us for two scalar bumps, and it is the
+# single largest cost in add_alignment. The difference form is O(1) per
+# block, so it also stops scaling with read length.
+#
+# The integration is an in-place cumsum, so there is no second array: the
+# buffer holds diffs before `coverage` is first read and per-base counts
+# after. `add_alignment` reverses the integration if anyone accumulates after
+# reading, which keeps that from silently corrupting the counts.
+#
+# The buffer is one longer than the contig so a block closing at the last
+# base has somewhere to put its -1; that final entry is always 0 once
+# integrated, since every +1 is matched.
 # ---------------------------------------------------------------------------
 
 
@@ -214,7 +238,6 @@ class ContigMetrics:
 
     name: str
     length: int
-    coverage: np.ndarray = field(repr=False, default=None)
 
     reads_mapped: int = 0
     bases_mapped: int = 0
@@ -235,22 +258,46 @@ class ContigMetrics:
     leading_clipped_bases: int = 0
 
     def __post_init__(self):
-        if self.coverage is None:
-            self.coverage = np.zeros(max(self.length, 0), dtype=np.int32)
+        # See COVERAGE_DIFF for why this is one longer than the contig, and
+        # why it holds differences rather than counts.
+        self._size = max(self.length, 0)
+        self._counts = np.zeros(self._size + 1, dtype=np.int32)
+        self._integrated = False
+
+    @property
+    def coverage(self) -> np.ndarray:
+        """Per-base coverage, integrating the difference array on first read.
+
+        A view, not a copy: writing through it corrupts the accumulator.  See
+        COVERAGE_DIFF.
+        """
+        if not self._integrated:
+            np.cumsum(self._counts, out=self._counts)
+            self._integrated = True
+        return self._counts[: self._size]
 
     def add_alignment(self, read: pysam.AlignedSegment) -> None:
-        """Add one alignment's coverage. See SOFT_CLIP_FIX."""
+        """Add one alignment's coverage. See SOFT_CLIP_FIX and COVERAGE_DIFF."""
         cigar = read.cigartuples
         if cigar is None:
             return
+        if self._integrated:
+            # Somebody read `coverage` mid-accumulation. Undo the cumsum so
+            # the bumps below still land on differences.
+            self._counts = np.diff(self._counts, prepend=0).astype(np.int32)
+            self._integrated = False
+        counts = self._counts
         pos = read.reference_start
-        ref_length = self.coverage.size
+        ref_length = self._size
         clipped = 0
         for index, (op, op_len) in enumerate(cigar):
             if op in _COVERING_OPS:
                 end = pos + op_len
                 if pos < ref_length:
-                    self.coverage[pos : min(end, ref_length)] += 1
+                    # min(end, ref_length), spelled out: this is the hot loop
+                    # and the builtin call is a measurable share of it.
+                    counts[pos] += 1
+                    counts[end if end < ref_length else ref_length] -= 1
                 pos = end
             elif op in _SKIPPING_OPS:
                 pos += op_len

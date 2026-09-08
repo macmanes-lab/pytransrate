@@ -26,7 +26,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
-from scipy.special import gammaln, logsumexp
+from scipy.special import gammaln
 
 __all__ = [
     "NUM_STATES",
@@ -51,6 +51,9 @@ DEFAULT_NULL_PRIOR = 0.7
 
 #: Only k in {0, 1} is considered (``const int maxk = 1``).
 _MAX_K = 1
+
+#: FLT_MIN, the floor the C++ puts under the flat changepoint prior.
+_FLT_MIN = float(np.finfo(np.float32).tiny)
 
 # ---------------------------------------------------------------------------
 # BINNING_QUIRK
@@ -130,32 +133,62 @@ def bin_coverage(
 
 #: gammaln lookup for the denominator, covering the usual bin/state counts.
 #: Sized generously; anything beyond falls back to a direct call.
-_GAMMALN_TABLE = gammaln(np.arange(4 * (NUM_BINS + NUM_STATES)))
+#:
+#: Held as a Python list, not an array: this is indexed ~2n times per contig
+#: with a scalar, and returning a float straight from a list beats unboxing a
+#: numpy scalar every time.
+_GAMMALN_TABLE = gammaln(np.arange(4 * (NUM_BINS + NUM_STATES))).tolist()
+
+#: ``log(gamma(NUM_STATES))``, the leading term of every segment likelihood.
+_LOG_GAMMA_NUM_STATES = float(gammaln(NUM_STATES))
 
 
 def _log_denominator(length: int, n_states: int) -> float:
     """gammaln(length + n_states), from the table when it reaches."""
     index = length + n_states
-    if 0 <= index < _GAMMALN_TABLE.size:
-        return float(_GAMMALN_TABLE[index])
+    if 0 <= index < len(_GAMMALN_TABLE):
+        return _GAMMALN_TABLE[index]
     return float(gammaln(index))
 
 
-def _log_segment_likelihood(counts: np.ndarray, length: int) -> float:
-    """Log of ``prob_R_given_k_rhs``: the Dirichlet-multinomial term.
+def _log_sum_exp(values) -> float:
+    """``log(sum(exp(v)))``, shifted by the maximum for stability.
 
-    The C++ evaluates this with ``tgamma`` in linear space and stores the
-    result through a ``float`` temporary (``float result = pRk_[k];`` in
-    ``prob_R_given_k``).  With 24 categories the numerator and denominator
-    reach ~1e22 and ~1e69 respectively, so sparse state vectors produce
-    values below FLT_MIN that flush to zero -- and a zero marginal makes the
-    posterior 0/0.  Working in log space removes that failure mode entirely;
-    it changes the answer only where the C++ had already lost the value.
+    scipy's ``logsumexp`` is the obvious call here and was what this used,
+    but it spends most of its time in array-API promotion machinery -- which
+    at these sizes (two elements, or one per bin) is all of the cost and none
+    of the benefit.  Measured over a run this was ~70% of the segmenter.
     """
-    n_states = counts.size
-    return float(
-        gammaln(n_states) + gammaln(counts + 1.0).sum() - gammaln(length + n_states)
-    )
+    largest = max(values)
+    if largest == -math.inf:
+        return -math.inf
+    total = 0.0
+    for value in values:
+        total += math.exp(value - largest)
+    return largest + math.log(total)
+
+
+# ---------------------------------------------------------------------------
+# LOG_SPACE
+#
+# The C++ evaluates prob_R_given_k_rhs with `tgamma` in linear space and
+# stores the result through a `float` temporary (`float result = pRk_[k];` in
+# prob_R_given_k).  With 24 categories the numerator and denominator reach
+# ~1e22 and ~1e69 respectively, so sparse state vectors produce values below
+# FLT_MIN that flush to zero -- and a zero marginal makes the posterior 0/0.
+# Every likelihood below is therefore carried as
+#
+#     log P(R | segment) = gammaln(S) + sum_i gammaln(c_i + 1)
+#                          - gammaln(n + S)
+#
+# which removes that failure mode entirely; it changes the answer only where
+# the C++ had already lost the value.
+#
+# The middle term is never summed over all S categories.  It changes by
+# exactly log(c + 1) when one count goes c -> c + 1, because
+# gammaln(c + 2) - gammaln(c + 1) = log(c + 1), so it is carried as a running
+# scalar as the state vector is walked.
+# ---------------------------------------------------------------------------
 
 
 def prob_not_segmented(
@@ -178,60 +211,66 @@ def prob_not_segmented(
     Returns:
         Probability in [0, 1].
     """
-    seq = np.asarray(states, dtype=np.int64)
-    seq = np.clip(seq, 0, n_states - 1)
-    total = int(seq.size)
+    # Plain Python lists rather than arrays: the vector is one entry per bin
+    # (30 by default), and at that size every numpy call is overhead.
+    seq = states.tolist() if hasattr(states, "tolist") else list(states)
+    total = len(seq)
 
     if total == 0:
         return 1.0
 
-    counts = np.bincount(seq, minlength=n_states).astype(np.float64)
-    log_p_k0 = _log_segment_likelihood(counts, total)
+    top = n_states - 1
+    seq = [0 if s < 0 else top if s > top else int(s) for s in seq]
 
-    if total < 2:
-        # No changepoint is expressible, so k=1 has no support.
-        log_p_k1 = -np.inf
-    else:
-        # The C++ builds a full total x total matrix but reads only
-        # pmat[0][i] (prefix) and pmat[i+1][total-1] (suffix).  Running
-        # counts give the same values in O(total * n_states).
-        # sum(gammaln(c_i + 1)) changes by exactly log(c + 1) when one count
-        # goes c -> c + 1, because gammaln(c + 2) - gammaln(c + 1) = log(c + 1).
-        # So the numerator is carried as a running scalar instead of being
-        # recomputed over all n_states categories at every step.
-        log_gamma_states = float(gammaln(n_states))
+    log_gamma_states = (
+        _LOG_GAMMA_NUM_STATES if n_states == NUM_STATES else float(gammaln(n_states))
+    )
 
-        prefix = np.empty(total - 1, dtype=np.float64)
-        running = np.zeros(n_states, dtype=np.float64)
-        numerator = 0.0
-        for i in range(total - 1):
-            state = seq[i]
-            running[state] += 1.0
-            numerator += math.log(running[state])
+    # The C++ builds a full total x total matrix but reads only pmat[0][i]
+    # (prefix) and pmat[i+1][total-1] (suffix).  Running counts give the same
+    # values in one pass each; see LOG_SPACE for the recurrence.
+    #
+    # The prefix pass walks the whole vector, so its numerator after the last
+    # state is the k=0 numerator -- no separate pass over the counts.
+    prefix = [0.0] * (total - 1)
+    counts = [0] * n_states
+    numerator = 0.0
+    for i in range(total):
+        count = counts[seq[i]] + 1
+        counts[seq[i]] = count
+        numerator += math.log(count)
+        if i < total - 1:
             prefix[i] = (
                 log_gamma_states + numerator - _log_denominator(i + 1, n_states)
             )
+    log_p_k0 = log_gamma_states + numerator - _log_denominator(total, n_states)
 
-        suffix = np.empty(total - 1, dtype=np.float64)
-        running = np.zeros(n_states, dtype=np.float64)
+    if total < 2:
+        # No changepoint is expressible, so k=1 has no support.
+        log_p_k1 = -math.inf
+    else:
+        suffix = [0.0] * (total - 1)
+        counts = [0] * n_states
         numerator = 0.0
         for i in range(total - 1, 0, -1):
-            state = seq[i]
-            running[state] += 1.0
-            numerator += math.log(running[state])
+            count = counts[seq[i]] + 1
+            counts[seq[i]] = count
+            numerator += math.log(count)
             suffix[i - 1] = (
                 log_gamma_states + numerator - _log_denominator(total - i, n_states)
             )
 
         # Flat prior over changepoints, floored at FLT_MIN as in the C++.
-        p_a = max(1.0 / (total - 1), float(np.finfo(np.float32).tiny))
-        log_p_k1 = float(logsumexp(prefix + suffix + math.log(p_a)))
+        p_a = max(1.0 / (total - 1), _FLT_MIN)
+        log_p_a = math.log(p_a)
+        log_p_k1 = _log_sum_exp(
+            [prefix[i] + suffix[i] + log_p_a for i in range(total - 1)]
+        )
 
     # Posterior over k in {0, 1}.
-    with np.errstate(divide="ignore"):
-        log_prior_k0 = math.log(nullprior) if nullprior > 0.0 else -np.inf
-        remaining = (1.0 - nullprior) / _MAX_K
-        log_prior_k1 = math.log(remaining) if remaining > 0.0 else -np.inf
+    log_prior_k0 = math.log(nullprior) if nullprior > 0.0 else -math.inf
+    remaining = (1.0 - nullprior) / _MAX_K
+    log_prior_k1 = math.log(remaining) if remaining > 0.0 else -math.inf
 
     log_num_k0 = log_prior_k0 + log_p_k0
     log_num_k1 = log_prior_k1 + log_p_k1
@@ -240,5 +279,5 @@ def prob_not_segmented(
         # Both hypotheses are impossible; fall back to the prior.
         return float(nullprior)
 
-    log_marginal = float(logsumexp([log_num_k0, log_num_k1]))
-    return float(math.exp(log_num_k0 - log_marginal))
+    log_marginal = _log_sum_exp((log_num_k0, log_num_k1))
+    return math.exp(log_num_k0 - log_marginal)
