@@ -8,6 +8,106 @@ Versions up to and including 1.0.3 are the original Ruby
 [transrate](https://github.com/blahah/transrate). 2.0.0 is a rewrite in
 Python and **does not reproduce their scores** — see *Changed* below.
 
+## [2.1.0] — 2026-09-09
+
+A performance release. `-t/--threads` now applies to scoring as well as to
+mapping and quantification, and the serial work each process does is 1.9×
+faster per alignment and 5.3× faster per contig. **Scores are unchanged**
+apart from `p_seq_true`, which moved by up to 3.3e-15 when it was made exact
+so that a run no longer depends on its thread count — see *Changed*.
+
+### Added
+
+- `-t/--threads` now divides the scoring step as well as snap and salmon.
+  Fragments are independent units of work and every accumulator they feed is
+  additive, so the BAM is split by striding: each worker reads the whole file
+  and takes the fragments where `index % workers == worker`, writing into
+  anonymous mmaps shared through `fork` (`STRIDING`). Nothing large is
+  pickled and nothing comes back through a pipe.
+
+  The speedup is bounded by the share each worker pays regardless —
+  decompression and a fragment-boundary check on every record, ~0.26µs of
+  the ~1.5µs a record costs: ~3.7× at 8 workers, ~5.2× at 32, asymptotically
+  ~6×. The alternative of scanning for byte offsets first was measured and
+  comes out level, while needing an index the BAM does not have.
+
+  Falls back to one process wherever `fork` is unavailable, rather than
+  pretending. A worker killed by the OOM killer is now reported as such,
+  with the per-worker footprint, instead of hanging the parent on a queue.
+- Coverage integration and segmentation scoring are divided the same way,
+  by contiguous ranges of contigs, on assemblies past 5,000 of them.
+
+### Changed
+
+- **`p_seq_true` is exact, and no longer depends on `--threads`.** It was the
+  one accumulator carried as a running float, and float addition is not
+  associative, so dividing a contig's reads between workers moved it by up to
+  3.3e-15 — enough to reach the sixth decimal `contigs.csv` rounds to for one
+  or two contigs in 20,000. bam-read's per-alignment term reduces exactly to
+  `(35 - nm)/35`, so the numerator is carried as two integers and divided
+  once (`EXACT_SEQ_TRUE`). Every merged field is now an integer and the
+  parallel merge has no rounding to reason about. This is a one-time shift
+  against 2.0.0's numbers, at the fifteenth decimal.
+- `group_by_fragment` yields decoded `(read, flag, reference_id, length, nm)`
+  batches and `score_candidates` takes them, rather than bare
+  `AlignedSegment`s (`DECODE_ONCE`). `assign_fragments`, `accumulate_metrics`
+  and the CSV writers are unchanged.
+
+### Performance
+
+Profiled, not guessed. Every figure below is from one 1,202,766-record BAM
+over 5,000 contigs, and every stage listed produced the identical per-contig
+counters — verified by digest, and for the parallel work bit-identical
+`p_seq_true` and `p_not_segmented` at 1, 2, 3, 4, 8 and 13 workers.
+
+Per alignment record, through assignment and accumulation — the step that
+dominates a real run:
+
+| | µs/record |
+| --- | --- |
+| 2.0.0 | 2.40 |
+| stop paying numpy per alignment and per bin | 1.94 |
+| read each record's fields once, not four times | 1.61 |
+| decode once across the assign/accumulate boundary | 1.48 |
+| slotted accumulator, memoised orphan charge, single-candidate fast path | 1.25 |
+
+1.9× serial, before `--threads` divides what is left across processes.
+
+Per contig, in finalisation — coverage integration, `bases_uncovered` and the
+segmenter: **90.3µs → 17.0µs**. Coverage became a difference array integrated
+once rather than a slice increment per aligned block; `bin_coverage` stopped
+widening the whole coverage vector to int64 per contig and stopped paying
+numpy per 30-element bin; the segmenter took a `log` table for its running
+state counts and dropped scipy's `logsumexp` for a two-line one; and
+`bases_uncovered` counts covered bases rather than building a boolean
+temporary to count zeros.
+
+Measured and rejected, recorded so they are not tried again: a `memoryview`
+for the coverage bumps (2× faster in isolation, zero end to end), inlining
+`_read_length` into `decode` (inside the noise), a `reference_end`-based
+CIGAR fast path (~5%, and it changes leading-clip accounting behind a hard
+clip), and fusing `iter_alignments` into the grouping loop (cProfile
+attributes 0.28µs/record to that generator; it is actually 0.002µs).
+
+`longest_orf` is now the largest per-contig cost at ~57µs — roughly 5s on a
+100k-contig assembly, and serial. Two rewrites were tried and neither was
+faster. It feeds `n_with_orf`, `mean_orf_percent` and one `contigs.csv`
+column, never the score.
+
+### Fixed
+
+- `scripts/compare_orthogroup_picks.py` ordered its `.old.list`/`.new.list`
+  by the source it read from — `Orthogroups.txt` line order for
+  `--orthogroups`, lexicographic glob order for `--groups` — so the same run
+  produced differently ordered lists depending on the flag, and neither
+  matched ORP's own `good.<run>.list`. Both now sort by label, which is the
+  order ORP keeps deliberately: it reaches contig order in
+  `orthomerged.fasta` and so cd-hit-est, where it breaks length ties. Same
+  picks, different order.
+- `--pick-best` now imports ORP's `best_in_group` as well as `load_scores`
+  when the target is ORP 4.0.0 or later, which passes the member list
+  directly. Older checkouts keep the mirror.
+
 ## [2.0.0] — 2026-09-07
 
 First release of the Python implementation. The Ruby version is pinned to
@@ -126,4 +226,5 @@ end to end, with byte-identical scores:
   and raises, so a script using it gets an error rather than silently
   different output.
 
+[2.1.0]: https://github.com/macmanes-lab/pytransrate/releases/tag/v2.1.0
 [2.0.0]: https://github.com/macmanes-lab/pytransrate/releases/tag/v2.0.0
