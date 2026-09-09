@@ -11,13 +11,22 @@ groups change winner.
 
 Two things about where the inputs come from:
 
-* The CSV must be the one ORP actually feeds the picker -- the
-  **orthotransrate** run over ``merged.fasta`` (``oyster.py:580``), not a run
-  over the finished ``.ORP.fasta``.  Scoring the final assembly answers a
-  different question: those contigs have already survived selection.
-* ``makeorthout`` deletes the ``*.groups`` files once it is done
-  (``oyster.py:601``), so ``--orthogroups`` reads ``Orthogroups.txt``
-  directly and rebuilds them in memory, exactly as ``makegroups`` does.
+* The CSV must be the one ORP actually feeds the picker -- its
+  **orthotransrate** step, scoring ``merged.fasta``, not the **transrate**
+  step that scores the finished ``.ORP.fasta``.  Scoring the final assembly
+  answers a different question: those contigs have already survived
+  selection.
+* ``--orthogroups`` reads ``Orthogroups.txt`` and rebuilds the groups in
+  memory, which is what ORP itself now does.  Through ORP 3.x a
+  ``makegroups`` step split that file into one ``<i>.groups`` file per
+  orthogroup and ``makeorthout`` deleted them again on its way out; ORP
+  4.0.0 removed that round-trip, and ``pick_best_contigs.py`` reads
+  ``Orthogroups.txt`` directly, so the files are never written at all.
+  ``--groups`` is therefore only useful against an archived pre-4.0.0 run
+  directory.
+
+Step names rather than ``oyster.py`` line numbers throughout: the line
+numbers drifted within a single release.
 
 Usage::
 
@@ -25,7 +34,7 @@ Usage::
         --orthogroups .../Orthogroups.txt --out-prefix picks
 
     compare_orthogroup_picks.py old/contigs.csv new/contigs.csv \\
-        --groups orthofuse_dir/
+        --groups archived_orthofuse_dir/      # pre-4.0.0 runs only
 """
 
 from __future__ import annotations
@@ -115,7 +124,10 @@ def load_real_picker(path: str):
 
 
 def read_groups(groups_dir: str):
-    """Yield ``(label, [members])`` from a directory of ``*.groups``."""
+    """Yield ``(label, [members])`` from a directory of ``*.groups``.
+
+    Only pre-4.0.0 ORP run directories have these; see the module docstring.
+    """
     paths = sorted(glob.glob(os.path.join(groups_dir, "*groups")))
     if not paths:
         sys.exit(f"no *.groups files under {groups_dir!r}")
@@ -129,7 +141,11 @@ def read_orthogroups(path: str):
     """Yield ``(label, [members])`` from Orthogroups.txt.
 
     One group per line, ``OG0000001: contig_a contig_b ...``. The leading
-    token is the group label and is dropped, as makegroups does.
+    token is the group label and is dropped, as ORP does.
+
+    Groups are labelled ``<i>.groups`` after the per-orthogroup files ORP
+    wrote through 3.x, so a report reads the same whichever source it came
+    from.
     """
     with open(path) as handle:
         for index, line in enumerate(handle, start=1):
@@ -146,10 +162,14 @@ def main(argv=None) -> int:
     parser.add_argument("old_csv", help="contigs.csv from the baseline run")
     parser.add_argument("new_csv", help="contigs.csv from the run being tested")
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--groups", metavar="DIR", help="directory of *.groups")
+    source.add_argument(
+        "--groups", metavar="DIR",
+        help="directory of *.groups, from a pre-4.0.0 ORP run directory",
+    )
     source.add_argument(
         "--orthogroups", metavar="FILE",
-        help="Orthogroups.txt, when the *.groups files have been deleted",
+        help="Orthogroups.txt; the normal source, and the only one for a run "
+             "made by ORP 4.0.0 or later",
     )
     parser.add_argument(
         "--out-prefix", metavar="P",
