@@ -147,6 +147,25 @@ def _log_likelihood(nm: float, length: int, error_rate: float) -> float:
 #: Bit per mate: read 1 is 1, read 2 is 2. Cheaper than a set per fragment.
 _MATE_BITS = (0, 1, 1, 2)
 
+#: Orphan charges already computed, by ``(length, error rate, fraction)``.
+_ORPHAN_COSTS: dict = {}
+
+
+def _orphan_cost(length: int, error_rate: float, fraction: float) -> float:
+    """The charge for a mate a candidate does not explain, memoised.
+
+    A library has one or two read lengths, and the other two arguments are
+    settings, so this takes a handful of distinct values over a whole run --
+    but the expression it stands for was being evaluated once per fragment.
+    """
+    key = (length, error_rate, fraction)
+    cost = _ORPHAN_COSTS.get(key)
+    if cost is None:
+        cost = _ORPHAN_COSTS[key] = _log_likelihood(
+            fraction * length, length, error_rate
+        )
+    return cost
+
 
 def build_prior_tables(references, expression=None):
     """Per-reference prior and log-prior, indexed by reference id.
@@ -247,20 +266,24 @@ def score_candidates(
     if not mates:
         return {}
 
-    # Charge a missing mate as a badly-aligned one, so every candidate is
-    # scored over the same set of mates.
-    orphan_cost = _log_likelihood(
-        orphan_edit_fraction * typical_length, typical_length, error_rate
-    )
     n_mates = _MATE_BITS[mates]
+    orphan_cost = None
 
     scored = {}
     for ref_id, (log_likelihood, explained) in by_ref.items():
-        score = (
-            log_priors[ref_id]
-            + log_likelihood
-            + orphan_cost * (n_mates - _MATE_BITS[explained])
-        )
+        missing = n_mates - _MATE_BITS[explained]
+        if missing:
+            # Charge a missing mate as a badly-aligned one, so every
+            # candidate is scored over the same set of mates.  Most
+            # candidates explain every mate, and then there is nothing to
+            # charge, so the cost is only asked for when it is owed.
+            if orphan_cost is None:
+                orphan_cost = _orphan_cost(
+                    typical_length, error_rate, orphan_edit_fraction
+                )
+            score = log_priors[ref_id] + log_likelihood + orphan_cost * missing
+        else:
+            score = log_priors[ref_id] + log_likelihood
         scored[ref_id] = (score, priors[ref_id], references[ref_id])
     return scored
 
@@ -341,15 +364,19 @@ def assign_decoded(
         if not scored:
             continue
 
-        # Deterministic: best score, then higher prior, then name.
-        best_id = min(
-            scored,
-            key=lambda ref_id: (
-                -scored[ref_id][0],
-                -scored[ref_id][1],
-                scored[ref_id][2],
-            ),
-        )
+        # Deterministic: best score, then higher prior, then name.  Most
+        # fragments have a single candidate and nothing to order.
+        if len(scored) == 1:
+            best_id = next(iter(scored))
+        else:
+            best_id = min(
+                scored,
+                key=lambda ref_id: (
+                    -scored[ref_id][0],
+                    -scored[ref_id][1],
+                    scored[ref_id][2],
+                ),
+            )
 
         for record in batch:
             # Reference first: on a multi-mapping fragment most records fail

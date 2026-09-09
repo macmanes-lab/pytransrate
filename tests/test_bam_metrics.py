@@ -388,6 +388,27 @@ def test_empty_contig_metrics_are_wellformed():
     assert 0.0 <= contig.p_not_segmented <= 1.0
 
 
+def test_contig_metrics_compare_on_their_counters():
+    """The private coverage fields are declared but stay out of __eq__.
+
+    See SLOTTED_ACCUMULATOR: they became fields so the class could take
+    __slots__, and a numpy array in __eq__ would raise rather than compare.
+    """
+    left = ContigMetrics(name="x", length=10)
+    right = ContigMetrics(name="x", length=10)
+    assert left == right
+    left._counts[3] += 1
+    assert left == right
+    left.good += 1
+    assert left != right
+
+
+def test_contig_metrics_reject_an_unknown_attribute():
+    contig = ContigMetrics(name="x", length=10)
+    with pytest.raises(AttributeError):
+        contig.reads_maped = 1  # noqa: B010 - the typo is the point
+
+
 # ---------------------------------------------------------------------------
 # Soft-clip accounting
 #

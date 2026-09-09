@@ -180,6 +180,16 @@ def test_bin_coverage_log2_bucketing():
     assert np.all(populated == 3)
 
 
+@pytest.mark.parametrize(
+    "depth,state", [(1, 0), (2, 1), (3, 1), (7, 2), (8, 3), (15, 3), (16, 4)]
+)
+def test_bin_coverage_floors_between_powers_of_two(depth, state):
+    """The state is floor(log2(mean)), taken from the mean's bit length."""
+    cov = np.full(300, depth, dtype=np.int64)
+    populated = bin_coverage(cov)[:28]
+    assert np.all(populated == state)
+
+
 def test_bin_coverage_zero_coverage_is_state_zero():
     assert np.all(bin_coverage(np.zeros(300, dtype=np.int64)) == 0)
 

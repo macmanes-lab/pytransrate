@@ -162,6 +162,40 @@ def test_orphan_edit_fraction_is_a_fraction():
     assert 0.0 < ORPHAN_EDIT_FRACTION < 1.0
 
 
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"orphan_edit_fraction": 0.05},
+        {"orphan_edit_fraction": 0.40},
+        {"error_rate": 0.001},
+        {"error_rate": 0.10},
+    ],
+)
+def test_the_orphan_charge_follows_its_settings(settings):
+    """The charge is memoised, so it has to be keyed on what it depends on."""
+    batch = [
+        _aln("f", 0, 10, nm=0), _aln("f", 0, 200, nm=0, read1=False),
+        _aln("f", 1, 10, nm=0, secondary=True),  # one mate only: charged
+    ]
+    decoded = _decoded(batch)
+    default = score_candidates(decoded, REFS, {"txA": 10.0, "txB": 10.0})
+    changed = score_candidates(decoded, REFS, {"txA": 10.0, "txB": 10.0}, **settings)
+
+    # txA explains both mates, so only txB's score moves with the charge.
+    assert changed[1][0] != default[1][0]
+
+
+def test_the_orphan_charge_is_not_levied_on_a_complete_candidate():
+    """A candidate explaining every mate is scored on its alignments alone."""
+    batch = [_aln("f", 0, 10, nm=3), _aln("f", 0, 200, nm=3, read1=False)]
+    decoded = _decoded(batch)
+    scored = score_candidates(decoded, REFS, {"txA": 10.0})
+    loosened = score_candidates(
+        decoded, REFS, {"txA": 10.0}, orphan_edit_fraction=0.9
+    )
+    assert scored[0][0] == loosened[0][0]
+
+
 def test_unmapped_records_are_ignored():
     read = _aln("f", 0, 10)
     read.flag = read.flag | 4

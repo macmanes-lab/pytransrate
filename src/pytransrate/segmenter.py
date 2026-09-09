@@ -101,7 +101,7 @@ def bin_coverage(
     Returns:
         Integer state vector, length ``n_bins`` when ``pad_bins`` is True.
     """
-    coverage = np.asarray(coverage, dtype=np.int64)
+    coverage = np.asarray(coverage)
     ref_length = int(coverage.size)
 
     states = np.zeros(n_bins, dtype=np.int64)
@@ -112,21 +112,32 @@ def bin_coverage(
     # bin count never exceeds n_bins, so no clamping is needed below.
     bin_width = ref_length // n_bins + 1
 
-    # Vectorised equivalent of the C++ per-base accumulation loop: sum each
-    # bin, then take the integer mean exactly as `total / counter` did.
-    starts = np.arange(0, ref_length, bin_width)
-    sums = np.add.reduceat(coverage, starts)
-    counts = np.diff(np.append(starts, ref_length))
-    means = sums // counts  # integer division, as in C++
+    # The per-bin sum is the one step worth handing to numpy: it is the only
+    # one that walks the contig. Everything after it is at most n_bins wide,
+    # where a numpy call costs more than the arithmetic it performs -- so the
+    # sums come back as a list and the rest is plain Python.
+    #
+    # `dtype` names the accumulator instead of leaving it to the platform's
+    # default integer: a bin holds up to ref_length/30 + 1 bases, so a deeply
+    # covered contig can total past int32 while every base sits well inside
+    # it. Naming it here also means the coverage vector itself no longer has
+    # to be widened -- asarray(..., dtype=int64) was copying the whole thing
+    # for every contig, since the accumulators are int32.
+    starts = list(range(0, ref_length, bin_width))
+    sums = np.add.reduceat(coverage, starts, dtype=np.int64).tolist()
 
-    # log2(0) is -inf; the C++ max(0.0, ...) pins it to 0. Truncation toward
-    # zero matches the C++ (int) cast, and equals floor for means >= 1.
-    with np.errstate(divide="ignore", invalid="ignore"):
-        logs = np.log2(np.maximum(means, 1))
-    binned = np.minimum(max_state, logs.astype(np.int64))
-    binned[means <= 0] = 0
+    # Integer mean, exactly as `total / counter` did in C++, then
+    # floor(log2(mean)) -- which for a positive integer is its bit length
+    # less one, no float and no log2(0) to pin back to 0.
+    n_filled = len(starts)
+    binned = [0] * n_filled
+    for index in range(n_filled):
+        stop = starts[index + 1] if index + 1 < n_filled else ref_length
+        mean = sums[index] // (stop - starts[index])
+        if mean > 0:
+            state = mean.bit_length() - 1
+            binned[index] = max_state if state > max_state else state
 
-    n_filled = binned.size
     states[:n_filled] = binned
     return states if pad_bins else states[:n_filled]
 
@@ -141,6 +152,11 @@ _GAMMALN_TABLE = gammaln(np.arange(4 * (NUM_BINS + NUM_STATES))).tolist()
 
 #: ``log(gamma(NUM_STATES))``, the leading term of every segment likelihood.
 _LOG_GAMMA_NUM_STATES = float(gammaln(NUM_STATES))
+
+#: ``log(i)`` for the running state counts, which never exceed the number of
+#: bins.  Sized past that so a caller binning more finely still hits it; the
+#: entry at 0 is a placeholder, since a count reaching this table is >= 1.
+_LOG_INT_TABLE = [0.0] + [math.log(i) for i in range(1, 8 * NUM_BINS)]
 
 
 def _log_denominator(length: int, n_states: int) -> float:
@@ -222,6 +238,12 @@ def prob_not_segmented(
     top = n_states - 1
     seq = [0 if s < 0 else top if s > top else int(s) for s in seq]
 
+    # log(count) for counts inside the table, which is every count a bin
+    # vector can produce.  Two passes ask for one per state, so this is the
+    # busiest arithmetic in the function.
+    log_int = _LOG_INT_TABLE
+    n_logs = len(log_int)
+
     log_gamma_states = (
         _LOG_GAMMA_NUM_STATES if n_states == NUM_STATES else float(gammaln(n_states))
     )
@@ -236,9 +258,10 @@ def prob_not_segmented(
     counts = [0] * n_states
     numerator = 0.0
     for i in range(total):
-        count = counts[seq[i]] + 1
-        counts[seq[i]] = count
-        numerator += math.log(count)
+        state = seq[i]
+        count = counts[state] + 1
+        counts[state] = count
+        numerator += log_int[count] if count < n_logs else math.log(count)
         if i < total - 1:
             prefix[i] = (
                 log_gamma_states + numerator - _log_denominator(i + 1, n_states)
@@ -249,23 +272,26 @@ def prob_not_segmented(
         # No changepoint is expressible, so k=1 has no support.
         log_p_k1 = -math.inf
     else:
-        suffix = [0.0] * (total - 1)
-        counts = [0] * n_states
-        numerator = 0.0
-        for i in range(total - 1, 0, -1):
-            count = counts[seq[i]] + 1
-            counts[seq[i]] = count
-            numerator += math.log(count)
-            suffix[i - 1] = (
-                log_gamma_states + numerator - _log_denominator(total - i, n_states)
-            )
-
         # Flat prior over changepoints, floored at FLT_MIN as in the C++.
         p_a = max(1.0 / (total - 1), _FLT_MIN)
         log_p_a = math.log(p_a)
-        log_p_k1 = _log_sum_exp(
-            [prefix[i] + suffix[i] + log_p_a for i in range(total - 1)]
-        )
+
+        # The suffix pass builds the k=1 terms as it goes: each one is only
+        # ever read against the prefix at the same changepoint, so there is
+        # nothing to keep the suffixes themselves for.
+        terms = [0.0] * (total - 1)
+        counts = [0] * n_states
+        numerator = 0.0
+        for i in range(total - 1, 0, -1):
+            state = seq[i]
+            count = counts[state] + 1
+            counts[state] = count
+            numerator += log_int[count] if count < n_logs else math.log(count)
+            suffix = (
+                log_gamma_states + numerator - _log_denominator(total - i, n_states)
+            )
+            terms[i - 1] = prefix[i - 1] + suffix + log_p_a
+        log_p_k1 = _log_sum_exp(terms)
 
     # Posterior over k in {0, 1}.
     log_prior_k0 = math.log(nullprior) if nullprior > 0.0 else -math.inf
