@@ -77,7 +77,9 @@ NEAR_TIE = 0.01
 #   * load_scores keeps the highest score when an id appears twice.
 #
 # Pass --pick-best to import the real implementation instead of this mirror,
-# which removes any chance of the two drifting apart.
+# which removes any chance of the two drifting apart. From ORP 4.0.0 that
+# covers the selection itself and not just the CSV loader -- see
+# load_real_picker.
 # ---------------------------------------------------------------------------
 
 
@@ -114,13 +116,24 @@ def best_in_group(members, scores):
 
 
 def load_real_picker(path: str):
-    """Import ORP's pick_best_contigs.py so the rule cannot drift."""
+    """Import ORP's pick_best_contigs.py so the rule cannot drift.
+
+    Returns ``(load_scores, best_in_group)``. Up to ORP 3.x the real
+    ``best_in_group`` took a path to an ``<i>.groups`` file, so only the CSV
+    loader could be reused and the selection rule stayed a mirror however
+    this flag was passed. ORP 4.0.0 gave it the member list directly -- the
+    signature this script's mirror already had -- so from that release the
+    rule itself is importable. ``read_orthogroups`` exists only in the newer
+    picker, which is what tells the two apart.
+    """
     spec = importlib.util.spec_from_file_location("pick_best_contigs", path)
     if spec is None or spec.loader is None:
         sys.exit(f"could not import {path!r}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.load_scores
+    if hasattr(module, "read_orthogroups"):
+        return module.load_scores, module.best_in_group
+    return module.load_scores, best_in_group
 
 
 def read_groups(groups_dir: str):
@@ -147,12 +160,23 @@ def read_orthogroups(path: str):
     wrote through 3.x, so a report reads the same whichever source it came
     from.
     """
+    groups = []
     with open(path) as handle:
         for index, line in enumerate(handle, start=1):
             tokens = line.split()
             if not tokens:
                 continue
-            yield f"{index}.groups", tokens[1:]
+            groups.append((f"{index}.groups", tokens[1:]))
+    # Label order, not file order. ORP writes one line per group into
+    # good.<run>.list in exactly this order -- lexicographic on the
+    # <i>.groups name, so 1, 10, 100, 2, ... -- inherited from the glob its
+    # picker used to do and kept deliberately, because that order reaches
+    # cd-hit-est and so the final assembly. Matching it is what makes
+    # --out-prefix's .old.list/.new.list diffable against a real
+    # good.<run>.list, and makes a report from --orthogroups identical to one
+    # from --groups, which sorts the same way by construction.
+    groups.sort(key=lambda item: item[0])
+    return groups
 
 
 def main(argv=None) -> int:
@@ -182,9 +206,9 @@ def main(argv=None) -> int:
     )
     args = parser.parse_args(argv)
 
-    reader = load_scores
+    reader, picker = load_scores, best_in_group
     if args.pick_best:
-        reader = load_real_picker(args.pick_best)
+        reader, picker = load_real_picker(args.pick_best)
     old_scores = reader(args.old_csv)
     new_scores = reader(args.new_csv)
 
@@ -210,8 +234,8 @@ def main(argv=None) -> int:
         found_old += sum(1 for m in members if m in old_scores)
         found_new += sum(1 for m in members if m in new_scores)
 
-        old_pick = best_in_group(members, old_scores)
-        new_pick = best_in_group(members, new_scores)
+        old_pick = picker(members, old_scores)
+        new_pick = picker(members, new_scores)
         if old_pick:
             old_list.append(old_pick)
         if new_pick:
