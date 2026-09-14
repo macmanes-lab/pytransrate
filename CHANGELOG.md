@@ -23,6 +23,12 @@ Python and **does not reproduce their scores** — see *Changed* below.
   same location-namespace limit, bounded by `2**(locationSize*8) - 1`, not
   a machine memory limit.
 
+### Changed
+
+- The banner is blue and yellow, replacing the green/yellow/red flanks
+  inherited from the Ruby. Colour remains opt-in and off when `NO_COLOR` is
+  set, `TERM=dumb`, or stderr is not a terminal.
+
 ## [2.1.0] — 2026-09-09
 
 A performance release. `-t/--threads` now applies to scoring as well as to

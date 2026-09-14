@@ -1,8 +1,8 @@
 """The startup banner.
 
-Keeps the shape of the Ruby's banner -- same figlet font, same coloured
-``░▓▓▓^▓▓▓░`` flanks -- so the lineage is visible, while the wordmark and
-version make clear this is not the original.
+Keeps the shape of the Ruby's banner -- same figlet font, same
+``░▓▓▓^▓▓▓░`` flanks -- so the lineage is visible, while the blue-and-yellow
+colouring, the wordmark and the version make clear this is not the original.
 
 The banner goes to stderr: it is decoration, not data.  The run report --
 every INFO line, including the contig and mapping metric blocks -- goes to
@@ -37,8 +37,8 @@ _WORDMARK = r"""
 #: The Ruby's flanking motif, from http://xkcd.com/1179/ by way of snap.rb.
 _FLANK = "░▓▓▓^▓▓▓░"
 
-_GREEN, _YELLOW, _RED, _DIM, _RESET = (
-    "\033[32m", "\033[33m", "\033[31m", "\033[2m", "\033[0m"
+_BLUE, _YELLOW, _DIM, _RESET = (
+    "\033[34m", "\033[33m", "\033[2m", "\033[0m"
 )
 
 #: Below this many columns the full wordmark wraps and looks broken.
@@ -91,11 +91,12 @@ def banner(colour: bool = False, width: int | None = None) -> str:
         lines[offset] = pad + lines[offset]
 
     if colour:
-        flanks = [_GREEN + _FLANK + _RESET,
-                  _YELLOW + _FLANK + _RESET,
-                  _RED + _FLANK + _RESET]
+        # Blue wordmark between yellow flanks.
+        flank = _YELLOW + _FLANK + _RESET
+        for offset in range(len(lines)):
+            lines[offset] = _BLUE + lines[offset] + _RESET
         # Flank the three body lines, as the Ruby did.
-        for offset, flank in zip(range(2, 5), flanks):
+        for offset in range(2, 5):
             lines[offset] = f"{flank} {lines[offset]} {flank}"
     else:
         for offset in range(2, 5):
@@ -104,7 +105,7 @@ def banner(colour: bool = False, width: int | None = None) -> str:
     footer = f"  {version}  ·  {TAGLINE}"
     attribution = f"  {_ATTRIBUTION}"
     if colour:
-        footer = f"  {version}  ·  {TAGLINE}"
+        footer = f"{_YELLOW}  {version}{_RESET}  ·  {TAGLINE}"
         attribution = f"{_DIM}  {_ATTRIBUTION}{_RESET}"
 
     return "\n".join(["", *lines, "", footer, attribution, ""])
