@@ -21,6 +21,7 @@ import re
 from pathlib import Path
 
 from pytransrate.cmd import CommandError, run, which
+from pytransrate.compression import open_binary
 
 __all__ = ["SnapError", "Snap"]
 
@@ -513,10 +514,12 @@ class Snap:
 
         for path in str(reads).split(","):
             try:
-                with open(path, "rb") as handle:
+                # open_binary, not open: counting the lines of a gzip stream
+                # counts compressed data and gives a meaningless figure.
+                with open_binary(path) as handle:
                     lines = sum(1 for _ in handle)
                 self.read_count += lines // 4
-            except OSError:
+            except (OSError, EOFError):  # EOFError: a truncated gzip file
                 logger.warning("couldn't count reads in %s", path)
 
         if self._read_count_file:

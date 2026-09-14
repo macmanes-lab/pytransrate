@@ -9,7 +9,6 @@ external; assignment and per-contig accumulation happen in-process via
 
 from __future__ import annotations
 
-import gzip
 import logging
 import mmap
 import multiprocessing
@@ -30,6 +29,7 @@ from pytransrate.bam_metrics import (
     finalise_contigs,
     iter_alignments,
 )
+from pytransrate.compression import open_text
 from pytransrate.segmenter import DEFAULT_NULL_PRIOR
 
 __all__ = ["READ_STATS_KEYS", "ReadMetrics", "get_read_length"]
@@ -430,12 +430,6 @@ _LOWCOVERED_BELOW = 10
 _SEGMENTED_BELOW = 0.5
 
 
-def _open_maybe_gzip(path):
-    if str(path).endswith((".gz", ".gzip")):
-        return gzip.open(path, "rt")
-    return open(path)
-
-
 def get_read_length(reads) -> int:
     """Maximum read length over the first few thousand reads.
 
@@ -444,7 +438,7 @@ def get_read_length(reads) -> int:
     """
     first = str(reads).split(",")[0]
     longest = 0
-    with _open_maybe_gzip(first) as handle:
+    with open_text(first) as handle:
         for index, line in enumerate(handle):
             if index >= _READ_LENGTH_SAMPLE * 4:
                 break

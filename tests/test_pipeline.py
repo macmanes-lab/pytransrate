@@ -14,6 +14,7 @@ snap-aligner soft-clipping change. None of it is visible from unit tests.
 from __future__ import annotations
 
 import csv
+import gzip
 import os
 import random
 import shutil
@@ -111,6 +112,63 @@ def run_output(dataset):
     if result.returncode != 0:
         pytest.fail(f"transrate failed:\n{result.stdout}\n{result.stderr}")
     return out
+
+
+@pytest.fixture(scope="module")
+def gzipped_run_output(dataset):
+    """The same run with every input gzipped.
+
+    This is the only place snap-aligner itself is asked whether it reads
+    gzipped FASTQ -- pytransrate passes the read files straight through
+    rather than decompressing a library that may be tens of gigabytes, so
+    nothing short of the binary can confirm it. The assembly takes the other
+    path: snap and salmon are handed a decompressed copy.
+    """
+    work = dataset["dir"] / "gz"
+    work.mkdir(exist_ok=True)
+
+    paths = {}
+    for key in ("fasta", "left", "right"):
+        source = dataset[key]
+        target = work / (source.name + ".gz")
+        with open(source, "rb") as handle, gzip.open(target, "wb") as out:
+            shutil.copyfileobj(handle, out)
+        paths[key] = target
+
+    out = work / "out"
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "pytransrate.cli",
+            "-o", str(out),
+            "-t", "2",
+            "-a", str(paths["fasta"]),
+            "--left", str(paths["left"]),
+            "--right", str(paths["right"]),
+        ],
+        cwd=work,
+        capture_output=True,
+        text=True,
+        env=_env(),
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            f"transrate failed on gzipped input:\n{result.stdout}\n{result.stderr}"
+        )
+    return out
+
+
+def test_gzipped_input_scores_identically(run_output, gzipped_run_output):
+    """Compression is not allowed to change a single number."""
+    def scores(directory):
+        rows = list(csv.reader(open(directory / "contigs.csv")))
+        return {row[0]: row[8] for row in rows[1:]}
+
+    assert scores(gzipped_run_output) == scores(run_output)
+
+
+def test_gzipped_assembly_leaves_no_decompressed_copy(gzipped_run_output):
+    """The plain copy exists for snap and salmon and no longer."""
+    assert not list(gzipped_run_output.rglob("assembly.fa"))
 
 
 def test_produces_the_two_csvs(run_output):

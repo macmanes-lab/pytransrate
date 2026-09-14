@@ -99,6 +99,12 @@ Sequence metrics alone, with no aligner needed:
 pytransrate -a assembly.fa -o results
 ```
 
+Gzipped inputs are read directly, in any combination:
+
+```bash
+pytransrate -a assembly.fa.gz --left reads.1.fq.gz --right reads.2.fq.gz -o results
+```
+
 **[USAGE.md](USAGE.md)** is the full reference: every option, what each metric
 means, how to read a score, tuning for large or repetitive assemblies, the
 comparison tooling, and troubleshooting.

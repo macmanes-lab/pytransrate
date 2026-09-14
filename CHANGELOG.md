@@ -10,6 +10,24 @@ Python and **does not reproduce their scores** — see *Changed* below.
 
 ## [Unreleased]
 
+### Added
+
+- **Gzipped input.** The assembly and the read files may each be gzipped, in
+  any combination: `pytransrate -a asm.fa.gz --left r1.fq.gz --right
+  r2.fq.gz`. Compression is detected by the magic number rather than the file
+  name, so a gzipped file named anything is read correctly and a plain file
+  named `.gz` is not mangled; bgzipped input works for the same reason.
+
+  The read files are handed to snap-aligner still compressed — it reads
+  gzipped FASTQ itself, and a library is routinely tens of gigabytes. The
+  assembly cannot be: snap and salmon take a filename, not a handle, so a
+  gzipped assembly is decompressed into the output directory for the length
+  of the index-and-quantify step and removed afterwards. A run without reads
+  decompresses nothing at all, since the FASTA is read in-process.
+
+  Scores are unaffected — the pipeline test asserts a gzipped run reproduces
+  an uncompressed one contig for contig.
+
 ### Fixed
 
 - The `-locationSize` sweep now runs on every way snap reports that the
@@ -22,6 +40,11 @@ Python and **does not reproduce their scores** — see *Changed* below.
   this seed size` was missed the same way; despite its wording it is the
   same location-namespace limit, bounded by `2**(locationSize*8) - 1`, not
   a machine memory limit.
+
+- The read-count fallback counted lines of compressed data when a BAM was
+  reused and the saved count file was missing, giving a meaningless number of
+  fragments for gzipped reads. It decompresses first. The path only runs when
+  `--keep-bam` output is reused without its `*-read_count.txt`.
 
 ### Changed
 

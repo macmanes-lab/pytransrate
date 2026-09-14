@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 
+from pytransrate.compression import open_text
 from pytransrate.contig import Contig
 
 __all__ = ["AssemblyError", "Assembly", "BASIC_STATS_KEYS", "CONTIG_METRICS_KEYS"]
@@ -54,10 +55,12 @@ def parse_fasta(path):
     The identifier is everything up to the first whitespace or ``|``,
     matching BioRuby's ``entry_id``, which is what the Ruby used for contig
     names.
+
+    Gzipped FASTA is read directly; see :mod:`pytransrate.compression`.
     """
     name = None
     chunks: list[str] = []
-    with open(path) as handle:
+    with open_text(path) as handle:
         for line in handle:
             line = line.rstrip("\n\r")
             if not line:

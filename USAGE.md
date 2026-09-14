@@ -43,6 +43,31 @@ pytransrate -a assembly.fa -o results
 The output directory is refused if it already holds an `assemblies.csv`, so a
 rerun cannot silently overwrite a previous result. Give each run its own `-o`.
 
+### Gzipped input
+
+The assembly and the read files may be gzipped, in any combination, and may
+be mixed with uncompressed ones:
+
+```bash
+pytransrate -a assembly.fa.gz --left r1.fq.gz --right r2.fq.gz -o results
+```
+
+Compression is detected by reading the first two bytes, not by the file
+name, so a gzipped file called something other than `.gz` is read correctly
+and a plain file called `.gz` is not mangled. bgzipped input works too, being
+valid gzip.
+
+The read files are passed to snap-aligner compressed, which is why a library
+of any size costs nothing here. The assembly is different: snap and salmon
+are given a filename rather than a handle, so a gzipped assembly is
+decompressed once into the output directory for them and deleted when they
+are done — briefly, one extra copy of the assembly on disk. A run without
+reads decompresses nothing, since pytransrate reads the FASTA itself.
+
+Output naming ignores the suffix: `asm.fa.gz` gives the same result
+directory and the same `asm.fa_score_optimisation.csv` as `asm.fa` would.
+The `assembly` column of `assemblies.csv` records the path as given.
+
 ### The run report
 
 Everything goes to **stdout**; the banner goes to stderr. The first line

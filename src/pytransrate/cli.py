@@ -30,6 +30,7 @@ from pytransrate.assembly import Assembly, AssemblyError
 from pytransrate.bam_metrics import MalformedBamError
 from pytransrate.banner import TAGLINE, print_banner
 from pytransrate.cmd import CommandError
+from pytransrate.compression import plain_path, strip_gzip_suffix
 from pytransrate.mapper import Snap
 from pytransrate.output import (
     READ_STATS_KEYS,
@@ -123,7 +124,10 @@ def build_parser() -> argparse.ArgumentParser:
         "-a", "--assembly",
         required=True,
         metavar="FASTA",
-        help="assembly file(s) in FASTA format, comma-separated",
+        help=(
+            "assembly file(s) in FASTA format, comma-separated. "
+            "gzipped files are read directly"
+        ),
     )
 
     reads = parser.add_argument_group(
@@ -132,7 +136,9 @@ def build_parser() -> argparse.ArgumentParser:
         "Without them, only sequence-based metrics are computed.",
     )
     reads.add_argument(
-        "--left", metavar="FASTQ", help="left reads, comma-separated"
+        "--left",
+        metavar="FASTQ",
+        help="left reads, comma-separated; gzipped files are read directly",
     )
     reads.add_argument(
         "--right", metavar="FASTQ", help="right reads, comma-separated"
@@ -398,39 +404,46 @@ def analyse_assembly(assembly_path, args, result_dir: Path) -> dict:
 
     left, right = args.left, args.right  # already absolute, see check_arguments
 
-    logger.info("mapping reads with snap-aligner...")
+    # snap-aligner and salmon are given a filename, not a handle, so a
+    # gzipped assembly is decompressed for the length of this block and
+    # dropped again. Assembly above read the gzip itself, and without reads
+    # neither tool runs, so nothing is decompressed for a sequence-only run.
+    # The reads stay gzipped: snap reads them that way, and a library is
+    # orders of magnitude larger than an assembly. See pytransrate.compression.
     snap = Snap()
-    snap.build_index(
-        assembly_path,
-        threads=args.threads,
-        seed_size=args.seed_size,
-        location_size=args.location_size,
-    )
-    bam = snap.map_reads(
-        left, right, threads=args.threads,
-        max_seed_hits=args.max_seed_hits,
-        edit_distance=args.edit_distance,
-        extra_search_depth=args.extra_search_depth,
-        multi_edit_distance=args.multi_edit_distance,
-        max_alignments_per_pair=args.max_alignments_per_pair,
-        max_alignments_per_contig=(
-            args.max_alignments_per_contig
-            if args.max_alignments_per_contig > 0
-            else None
-        ),
-        max_candidate_pool=args.max_candidate_pool,
-    )
-    logger.info("%d fragments in library", snap.read_count)
+    with plain_path(assembly_path, result_dir) as fasta:
+        logger.info("mapping reads with snap-aligner...")
+        snap.build_index(
+            fasta,
+            threads=args.threads,
+            seed_size=args.seed_size,
+            location_size=args.location_size,
+        )
+        bam = snap.map_reads(
+            left, right, threads=args.threads,
+            max_seed_hits=args.max_seed_hits,
+            edit_distance=args.edit_distance,
+            extra_search_depth=args.extra_search_depth,
+            multi_edit_distance=args.multi_edit_distance,
+            max_alignments_per_pair=args.max_alignments_per_pair,
+            max_alignments_per_contig=(
+                args.max_alignments_per_contig
+                if args.max_alignments_per_contig > 0
+                else None
+            ),
+            max_candidate_pool=args.max_candidate_pool,
+        )
+        logger.info("%d fragments in library", snap.read_count)
 
-    logger.info("quantifying with salmon...")
-    salmon = Salmon()
-    expression = salmon.run(
-        assembly_path,
-        bam,
-        threads=args.threads,
-        output_dir=str(result_dir / "salmon"),
-        error_model=not args.no_error_model,
-    )
+        logger.info("quantifying with salmon...")
+        salmon = Salmon()
+        expression = salmon.run(
+            fasta,
+            bam,
+            threads=args.threads,
+            output_dir=str(result_dir / "salmon"),
+            error_model=not args.no_error_model,
+        )
 
     logger.info("assigning fragments and computing read metrics...")
     read_metrics = ReadMetrics(assembly)
@@ -451,7 +464,7 @@ def analyse_assembly(assembly_path, args, result_dir: Path) -> dict:
     )
     score = optimiser.raw_score()
     weighted = optimiser.weighted_score()
-    prefix = Path(assembly_path).name
+    prefix = strip_gzip_suffix(assembly_path).name
     optimal, cutoff = optimiser.optimal_score(
         csv_path=str(result_dir / f"{prefix}_score_optimisation.csv")
     )
@@ -511,7 +524,7 @@ def main(argv=None) -> int:
 
         results = []
         for assembly_path in assemblies:
-            name = Path(assembly_path).stem
+            name = strip_gzip_suffix(assembly_path).stem
             result_dir = output / name if len(assemblies) > 1 else output
             result_dir.mkdir(parents=True, exist_ok=True)
 
@@ -530,7 +543,13 @@ def main(argv=None) -> int:
             str(outfile),
             with_reads=bool(args.left and args.right),
         )
-    except (CommandError, AssemblyError, MalformedBamError) as exc:
+    except (
+        CommandError,
+        AssemblyError,
+        MalformedBamError,
+        # plain_path, when the name the decompressed assembly wants is taken.
+        FileExistsError,
+    ) as exc:
         logger.error("%s", exc)
         return 1
 
