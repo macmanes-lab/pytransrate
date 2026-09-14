@@ -202,6 +202,19 @@ def build_parser() -> argparse.ArgumentParser:
             "is still too big at every location size"
         ),
     )
+    index.add_argument(
+        "--padding",
+        type=int,
+        default=1000,
+        metavar="N",
+        help=(
+            "snap index -p, Ns between contigs (default: 1000; snap's own "
+            "default is 2000). Counted toward the genome size, so on an "
+            "assembly with millions of contigs the padding, not the "
+            "sequence, is what exhausts the location namespace. Must stay "
+            "above --edit-distance"
+        ),
+    )
 
     mapping = parser.add_argument_group(
         "snap mapping tuning",
@@ -418,6 +431,7 @@ def analyse_assembly(assembly_path, args, result_dir: Path) -> dict:
             threads=args.threads,
             seed_size=args.seed_size,
             location_size=args.location_size,
+            padding=args.padding,
         )
         bam = snap.map_reads(
             left, right, threads=args.threads,

@@ -48,6 +48,37 @@ Python and **does not reproduce their scores** — see *Changed* below.
 
 ### Changed
 
+- **snap's contig padding drops from 2000 to 1000**, with `--padding` added to
+  override it. snap pads every contig with Ns so an alignment cannot run off
+  one contig into the next, and counts those Ns as genome: `FASTA.cpp` sizes
+  the genome as `fileSize + (nContigs + 1) * padding`, and the `-locationSize`
+  ceiling of `2**32 - 16` bases applies to that total.
+
+  snap's default of 2000 is sized for genomes, where a few hundred contigs
+  make the padding a rounding error. A transcriptome inverts it: at 1.5M
+  contigs averaging a kilobase, the padding contributes 3 Gbp of Ns on top of
+  ~1.5 Gbp of sequence, so the padding is larger than the assembly and is on
+  its own enough to cross the 4-byte ceiling. Crossing it forces the
+  `-locationSize` sweep up to 5, which pays for a second full index build and
+  then leaves the aligner holding a larger index in memory for the run.
+
+  1000 is the largest reduction that costs nothing on either bound snap
+  documents for this value. The correctness floor is the maximum edit
+  distance, which is 30 — two orders of magnitude clear. The other is a
+  performance note about the padding exceeding the paired-end gap, which is
+  the `-s` maximum of 1000: padding of 1000 sits at that bound rather than
+  above it, so a pair straddling two adjacent contigs is no longer separated
+  by more than the maximum spacing. It cannot be called a proper pair either
+  way — crossing the padding means crossing 1000 Ns, which no alignment
+  within an edit distance of 30 survives — so what changes is snap doing the
+  work to reject it, not the rejection. Pass `--padding` above 1000 + read
+  length if that ever shows up in a profile.
+
+  **This moves scores on any assembly where it changes the index**, since
+  contigs land at different genome locations. An index already built at 2000
+  is still read as-is; the padding is stored in it, and `build_index` reuses
+  a complete index rather than rebuilding it.
+
 - The banner is blue and yellow, replacing the green/yellow/red flanks
   inherited from the Ruby. Colour remains opt-in and off when `NO_COLOR` is
   set, `TERM=dumb`, or stderr is not a terminal.

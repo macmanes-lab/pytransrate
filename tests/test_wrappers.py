@@ -519,6 +519,46 @@ def test_partial_index_is_not_mistaken_for_a_complete_one(tmp_path, monkeypatch)
     assert len(calls) == 1
 
 
+def _padding(calls):
+    return [a for c in calls for a in c if a.startswith("-p")]
+
+
+def test_index_pads_below_snaps_own_default(tmp_path, monkeypatch):
+    """snap's 2000 is sized for genomes; see CONTIG_PADDING in mapper."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    calls = []
+    _fake_run(monkeypatch, [_Result(True)], calls)
+    _snap().build_index("a.fa")
+    assert _padding(calls) == ["-p1000"]
+
+
+def test_padding_is_attached_to_the_flag_without_a_space(tmp_path, monkeypatch):
+    """snap parses -p with atoi(argv[n] + 2), so a separate argument is lost."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    calls = []
+    _fake_run(monkeypatch, [_Result(True)], calls)
+    _snap().build_index("a.fa", padding=250)
+    assert _padding(calls) == ["-p250"]
+    assert "250" not in calls[0][calls[0].index("-p250") + 1:]
+
+
+def test_padding_survives_the_location_size_sweep(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    calls = []
+    _fake_run(
+        monkeypatch,
+        [_Result(False, "Genome is too big for 4 byte genome locations"),
+         _Result(True)],
+        calls,
+    )
+    _snap().build_index("a.fa")
+    assert _location_sizes(calls) == ["4", "5"]
+    assert _padding(calls) == ["-p1000", "-p1000"]
+
+
 def test_cli_exposes_both_index_knobs():
     from pytransrate.cli import build_parser
 
@@ -529,12 +569,20 @@ def test_cli_exposes_both_index_knobs():
     assert args.seed_size == 25
 
 
+def test_cli_exposes_padding():
+    from pytransrate.cli import build_parser
+
+    args = build_parser().parse_args(["-a", "x.fa", "--padding", "1500"])
+    assert args.padding == 1500
+
+
 def test_cli_defaults_leave_the_sweep_enabled():
     from pytransrate.cli import build_parser
 
     args = build_parser().parse_args(["-a", "x.fa"])
     assert args.location_size is None
     assert args.seed_size == 23
+    assert args.padding == 1000
 
 
 # ---------------------------------------------------------------------------

@@ -218,6 +218,7 @@ locations.
 | --- | --- | --- |
 | `--location-size {4-8}` | sweep 4→8 | bytes per genome location. The default retries upward whenever snap runs out of locations, and each failed attempt is a full index build — set this if you already know the value |
 | `--seed-size N` | 23 | the other fix when an assembly is still too big at every location size |
+| `--padding N` | 1000 | snap `-p`, Ns inserted between contigs. Counted toward the genome size, so on an assembly with millions of contigs the padding, not the sequence, is usually what exhausts the location namespace. Must stay above `--edit-distance` |
 
 ### snap mapping
 
@@ -272,6 +273,24 @@ All four mean the same thing, and pytransrate retries at `-locationSize`
 build, so if you already know an assembly needs 6, pass `--location-size 6`
 and skip the wasted work. If every size is still too small, raise
 `--seed-size`.
+
+**Check how much of that "genome" is padding first.** snap pads every contig
+with Ns and counts them as genome, so the size the location namespace has to
+cover is `n_bases + padding * (n_contigs + 1)`, not the assembly. On a
+transcriptome with millions of short contigs the padding is routinely larger
+than the sequence:
+
+```
+grep -c '^>' assembly.fa                          # n_contigs
+grep -v '^>' assembly.fa | tr -d '\n' | wc -c     # n_bases
+```
+
+If `n_bases` alone is comfortably under 4,294,967,280 but `n_bases + 1000 *
+n_contigs` is not, lowering `--padding` is the cheaper fix than stepping
+`--location-size` up: it avoids a second full index build and leaves a
+smaller index for the aligner to hold in memory. The floor is
+`--edit-distance` (30 by default). Note that changing the padding changes
+where contigs sit in the genome, and so moves scores.
 
 **A very redundant assembly.** Duplicate contigs differing by 0–2 bases
 generate large numbers of secondary alignments. The defaults are already

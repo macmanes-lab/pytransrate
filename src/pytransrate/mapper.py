@@ -4,9 +4,9 @@ Port of ``lib/transrate/snap.rb``, targeting **snap-aligner 2.0.5**
 (amplab/snap) rather than the abandoned Blahah 1.0dev.96 fork.
 
 Every flag the Ruby passed still exists in 2.0.5 and was verified against the
-real binary: index takes ``-s``, ``-t``, ``-bSpace`` and ``-locationSize``;
-paired takes ``-s min max``, ``-H``, ``-h``, ``-d``, ``-t``, ``-b``, ``-M``,
-``-D``, ``-om`` and ``-omax``.  ``-mcp`` is no longer passed by default --
+real binary: index takes ``-s``, ``-t``, ``-bSpace``, ``-p`` and
+``-locationSize``; paired takes ``-s min max``, ``-H``, ``-h``, ``-d``,
+``-t``, ``-b``, ``-M``, ``-D``, ``-om`` and ``-omax``.  ``-mcp`` is no longer passed by default --
 see MAX_CANDIDATE_POOL below.
 
 What is *not* unchanged is the output: see SOFT_CLIPPING below.
@@ -199,6 +199,58 @@ DEFAULT_MAX_ALIGNMENTS_PER_PAIR = 10
 DEFAULT_MAX_ALIGNMENTS_PER_CONTIG = 1
 
 # ---------------------------------------------------------------------------
+# CONTIG_PADDING
+#
+# snap pads every contig with Ns so an alignment cannot run off one contig
+# into the next, and those Ns are real bases as far as the index is
+# concerned: FASTA.cpp sizes the genome as fileSize + (nContigs + 1) *
+# padding and writes the padding in, so getCountOfBases() counts it and the
+# -locationSize check below is applied to the total.
+#
+# snap's own default is 2000 (GenomeIndex.cpp DEFAULT_PADDING), chosen for
+# genomes, where a few hundred contigs make the padding a rounding error.  A
+# transcriptome inverts that: the size the location namespace has to cover is
+#
+#     n_bases + padding * (n_contigs + 1)
+#
+# and a de-novo assembly has contigs by the million, averaging a kilobase or
+# two.  At 2000 the padding can exceed the assembly -- 1.5M contigs contribute
+# 3 Gbp of Ns -- which is enough on its own to cross the 4-byte location
+# ceiling of 2**32 - 16 bases and force the sweep below up to -locationSize 5.
+# Every genome location then costs 5 bytes rather than 4, for an index the
+# aligner has to hold in memory for the length of the run.  On the three of
+# the four messages below that snap only reaches after building, the failed
+# attempt costs a full index build as well; on "Genome is too big" it does
+# not, since that one is checked up front.
+#
+# 1000 is the largest reduction that costs nothing on either count snap
+# documents for this value:
+#
+#   "This must be as large as the largest edit distance you'll ever use, and
+#    there's a performance advantage to have it be bigger than any read you'll
+#    process or gap between paired-end reads."
+#
+# The edit distance is a correctness floor and is DEFAULT_EDIT_DISTANCE, 30 --
+# two orders of magnitude clear.  The second clause is a performance note, not
+# a correctness one, and the gap it refers to is the -s maximum in
+# build_paired_command, which is 1000.  Padding of 1000 sits exactly at that
+# bound rather than above it, so a pair whose ends straddle two adjacent
+# contigs is no longer separated by more than the maximum spacing.  It cannot
+# be called a proper pair regardless -- crossing the padding means crossing
+# 1000 Ns, which no alignment within an edit distance of 30 survives -- so
+# what is at stake is snap doing the work to reject it, not the rejection.
+# Raise this above 1000 + read length if that ever shows up in a profile.
+#
+# This does change alignments, and so scores, on any assembly where it changes
+# the index: contigs sit at different genome locations.  See the note in
+# CHANGELOG.md.
+# ---------------------------------------------------------------------------
+
+#: snap index -p, Ns inserted between contigs. Below snap's own default of
+#: 2000; see CONTIG_PADDING.
+DEFAULT_PADDING = 1000
+
+# ---------------------------------------------------------------------------
 # LOCATION_SIZE_FAILURES
 #
 # snap-aligner refuses to index a genome that does not fit the location-size
@@ -271,6 +323,7 @@ class Snap:
         threads: int = 8,
         seed_size: int = 23,
         location_size: int | None = None,
+        padding: int = DEFAULT_PADDING,
     ) -> str:
         """Build a snap index.
 
@@ -292,6 +345,9 @@ class Snap:
                 snap runs out of location namespace, as the Ruby did. Fixing
                 it is worth doing when you already know an assembly needs a
                 larger value -- each failed attempt is a full index build.
+            padding: passed as ``-p`` (no space, as snap requires).  Ns
+                inserted between contigs, and counted toward the genome size
+                the location namespace has to cover.  See CONTIG_PADDING.
 
         Raises:
             SnapError: if the build fails, or runs out of location namespace
@@ -324,6 +380,7 @@ class Snap:
                 "-s", seed_size,
                 f"-t{threads}",
                 "-bSpace",              # contig name ends at the first space
+                f"-p{padding}",         # see CONTIG_PADDING
                 "-locationSize", size,
             ]
             result = run(args)
