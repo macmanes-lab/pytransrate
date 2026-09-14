@@ -172,7 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     index = parser.add_argument_group(
         "snap index tuning",
-        "Only needed when a large or repetitive assembly overflows\nthe index.",
+        "Only needed when a large or repetitive assembly exhausts\nsnap's genome locations.",
     )
     index.add_argument(
         "--location-size",
@@ -181,9 +181,9 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="{4-8}",
         default=None,
         help=(
-            "snap -locationSize. Default sweeps 4 up to 8 on overflow; each "
-            "failed attempt is a full index build, so set this if you already "
-            "know the value"
+            "snap -locationSize. Default sweeps 4 up to 8 when snap runs "
+            "out of genome locations; each failed attempt is a full index "
+            "build, so set this if you already know the value"
         ),
     )
     index.add_argument(
@@ -193,7 +193,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help=(
             "snap index -s (default: 23). The other fix when an assembly "
-            "overflows at every location size"
+            "is still too big at every location size"
         ),
     )
 

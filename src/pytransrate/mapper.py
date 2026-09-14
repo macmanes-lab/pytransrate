@@ -197,9 +197,43 @@ DEFAULT_MAX_ALIGNMENTS_PER_PAIR = 10
 #: snap's -mpc, cap on alignments per contig, applied before -omax.
 DEFAULT_MAX_ALIGNMENTS_PER_CONTIG = 1
 
-_OVERFLOW_PATTERNS = (
+# ---------------------------------------------------------------------------
+# LOCATION_SIZE_FAILURES
+#
+# snap-aligner refuses to index a genome that does not fit the location-size
+# namespace in four different places, and all four are cured by a larger
+# -locationSize. Matching only some of them means the sweep below never runs
+# and the user is told to do by hand what pytransrate is meant to do for them,
+# so all four are listed here (GenomeIndex.cpp, snap 2.0.5):
+#
+#   "Genome is too big for %d byte genome locations.  Specify a larger
+#    location size with -locationSize"
+#       countOfBases > 2**(locationSize*8) - 16, checked before any index
+#       work -- the cheapest of the four to hit, and the one a large merged
+#       assembly hits first.
+#
+#   "Ran out of overflow table namespace. This genome cannot be indexed with
+#    this seed and location size.  Increase at least one."
+#
+#   "Trying to use too many overflow entries.  To index this genome, you
+#    either need a larger seed size or a larger location size."
+#
+#   "Not enough address space to index this genome with this seed size.  Try
+#    a larger seed or location size."
+#       despite the wording this is not a RAM limit: the bound is
+#       InvalidGenomeLocation, which is 2**(locationSize*8) - 1, so a larger
+#       location size does raise it.
+#
+# Match the distinctive head of each message only. snap wraps and punctuates
+# these inconsistently (note the double spaces), and the trailing advice is
+# what upstream is most likely to reword.
+# ---------------------------------------------------------------------------
+
+_LOCATION_SIZE_PATTERNS = (
+    re.compile(r"Genome is too big for \d+ byte genome locations"),
     re.compile(r"Ran out of overflow table namespace"),
     re.compile(r"Trying to use too many overflow entries"),
+    re.compile(r"Not enough address space to index this genome"),
 )
 
 _UNMATCHED_IDS = re.compile(r"Unmatched\s+read\s+IDs\s+(.*?)\s+and\s+(.*?)Use", re.S)
@@ -241,23 +275,26 @@ class Snap:
 
         ``-locationSize`` sets how many bytes each genome location occupies.
         Four is enough for most assemblies, but a large or highly repetitive
-        one exhausts the overflow table and snap refuses to index it:
+        one exhausts that namespace and snap refuses to index it:
 
-            Ran out of overflow table namespace. This genome cannot be
-            indexed with this seed and location size.  Increase at least one.
+            Genome is too big for 4 byte genome locations.  Specify a
+            larger location size with -locationSize
+
+        See LOCATION_SIZE_FAILURES above for the four ways snap says this.
 
         Args:
             fasta: assembly to index.
             threads: passed as ``-t`` (no space, as snap requires).
             seed_size: passed as ``-s``.
             location_size: fix ``-locationSize`` at this value and do not
-                sweep. ``None`` (the default) tries 4 and steps up to 8 on
-                an overflow error, as the Ruby did. Fixing it is worth doing
-                when you already know an assembly needs a larger value --
-                each failed attempt is a full index build.
+                sweep. ``None`` (the default) tries 4 and steps up to 8 when
+                snap runs out of location namespace, as the Ruby did. Fixing
+                it is worth doing when you already know an assembly needs a
+                larger value -- each failed attempt is a full index build.
 
         Raises:
-            SnapError: if the build fails, or overflows at every size tried.
+            SnapError: if the build fails, or runs out of location namespace
+                at every size tried.
         """
         fasta = Path(fasta)
         self.index_name = fasta.stem
@@ -294,7 +331,7 @@ class Snap:
                 return self.index_name
 
             last_error = result.stderr or result.stdout
-            if any(p.search(last_error) for p in _OVERFLOW_PATTERNS):
+            if any(p.search(last_error) for p in _LOCATION_SIZE_PATTERNS):
                 # Clear the partial index before retrying. rmdir() will not
                 # do -- snap leaves Genome, GenomeIndex, GenomeIndexHash and
                 # OverflowTable behind, and rmdir only removes empty dirs.
@@ -303,7 +340,8 @@ class Snap:
                 if size == sizes[-1]:
                     break
                 logger.warning(
-                    "snap index overflowed at -locationSize %d, retrying at %d",
+                    "snap ran out of genome locations at -locationSize %d, "
+                    "retrying at %d",
                     size,
                     size + 1,
                 )
@@ -312,7 +350,7 @@ class Snap:
 
         hint = (
             " Every location size from "
-            f"{sizes[0]} to {sizes[-1]} overflowed; try a larger --seed-size."
+            f"{sizes[0]} to {sizes[-1]} was too small; try a larger --seed-size."
             if len(sizes) > 1
             else f" Retry without --location-size to sweep {_LOCATION_SIZES.start}"
                  f"-{_LOCATION_SIZES.stop - 1}, or use a larger --seed-size."

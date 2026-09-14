@@ -186,12 +186,13 @@ Give both or neither.
 
 ### snap index
 
-Only needed when a large or repetitive assembly overflows the index.
+Only needed when a large or repetitive assembly exhausts snap's genome
+locations.
 
 | option | default | |
 | --- | --- | --- |
-| `--location-size {4-8}` | sweep 4→8 | bytes per genome location. The default retries upward on overflow, and each failed attempt is a full index build — set this if you already know the value |
-| `--seed-size N` | 23 | the other fix when an assembly overflows at every location size |
+| `--location-size {4-8}` | sweep 4→8 | bytes per genome location. The default retries upward whenever snap runs out of locations, and each failed attempt is a full index build — set this if you already know the value |
+| `--seed-size N` | 23 | the other fix when an assembly is still too big at every location size |
 
 ### snap mapping
 
@@ -232,11 +233,19 @@ output.
 
 ## Tuning for hard assemblies
 
-**The index overflows.** snap reports `Ran out of overflow table namespace` or
-`Trying to use too many overflow entries`. pytransrate retries at
-`-locationSize` 4, 5, 6, 7, 8 in turn, and each failed attempt is a complete
-index build. If you already know an assembly needs 6, pass
-`--location-size 6` and skip the wasted work. If every size overflows, raise
+**The index runs out of genome locations.** snap says one of four things:
+
+- `Genome is too big for 4 byte genome locations` — the assembly itself is
+  larger than the location namespace. Big merged assemblies hit this one.
+- `Ran out of overflow table namespace`
+- `Trying to use too many overflow entries`
+- `Not enough address space to index this genome with this seed size` —
+  despite the wording this is the same namespace limit, not a RAM limit.
+
+All four mean the same thing, and pytransrate retries at `-locationSize`
+4, 5, 6, 7, 8 in turn on any of them. Each failed attempt is a complete index
+build, so if you already know an assembly needs 6, pass `--location-size 6`
+and skip the wasted work. If every size is still too small, raise
 `--seed-size`.
 
 **A very redundant assembly.** Duplicate contigs differing by 0–2 bases

@@ -8,6 +8,21 @@ Versions up to and including 1.0.3 are the original Ruby
 [transrate](https://github.com/blahah/transrate). 2.0.0 is a rewrite in
 Python and **does not reproduce their scores** — see *Changed* below.
 
+## [Unreleased]
+
+### Fixed
+
+- The `-locationSize` sweep now runs on every way snap reports that the
+  location size is too small. It matched two of snap's four messages, so a
+  large assembly failing with `Genome is too big for 4 byte genome
+  locations.  Specify a larger location size with -locationSize` — the check
+  snap makes before any index work, and the one a big merged assembly hits
+  first — was reported as a hard failure at `-locationSize 4` instead of
+  being retried at 5. `Not enough address space to index this genome with
+  this seed size` was missed the same way; despite its wording it is the
+  same location-namespace limit, bounded by `2**(locationSize*8) - 1`, not
+  a machine memory limit.
+
 ## [2.1.0] — 2026-09-09
 
 A performance release. `-t/--threads` now applies to scoring as well as to

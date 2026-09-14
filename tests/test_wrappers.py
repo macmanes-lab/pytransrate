@@ -308,6 +308,26 @@ _OVERFLOW = (
     "with this seed and location size.  Increase at least one.\n"
 )
 
+# The other three ways snap 2.0.5 says the location size is too small, copied
+# verbatim from GenomeIndex.cpp (double spaces included). Each must drive the
+# sweep: matching only some of them leaves the user to set --location-size by
+# hand, which is what pytransrate is meant to spare them.
+_TOO_BIG = (
+    "Welcome to SNAP version 2.0.5.\n\n"
+    "Genome is too big for 4 byte genome locations.  Specify a larger "
+    "location size with -locationSize\n"
+    "SNAP exited with exit code 1 from line 569 of file "
+    "SNAPLib/GenomeIndex.cpp\n"
+)
+_TOO_MANY_ENTRIES = (
+    "Trying to use too many overflow entries.  To index this genome, you "
+    "either need a larger seed size or a larger location size.\n"
+)
+_NO_ADDRESS_SPACE = (
+    "Not enough address space to index this genome with this seed size.  "
+    "Try a larger seed or location size.\n"
+)
+
 
 def _fake_run(monkeypatch, outcomes, calls):
     import pytransrate.mapper as mapper
@@ -363,6 +383,40 @@ def test_index_steps_up_on_overflow(tmp_path, monkeypatch):
     )
     _snap().build_index("a.fa")
     assert _location_sizes(calls) == ["4", "5", "6"]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [_TOO_BIG, _TOO_MANY_ENTRIES, _NO_ADDRESS_SPACE],
+    ids=["too_big", "too_many_entries", "no_address_space"],
+)
+def test_every_location_size_message_drives_the_sweep(
+    tmp_path, monkeypatch, message
+):
+    """Regression: only two of snap's four messages used to be recognised.
+
+    A large merged assembly hits "Genome is too big for 4 byte genome
+    locations" first, and that one fell through to a hard failure -- the
+    sweep never ran and the build died at -locationSize 4.
+    """
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    calls = []
+    _fake_run(monkeypatch, [_Result(False, message), _Result(True)], calls)
+    _snap().build_index("a.fa")
+    assert _location_sizes(calls) == ["4", "5"]
+
+
+def test_sweep_message_on_stdout_is_recognised(tmp_path, monkeypatch):
+    """snap writes these to stderr, but run() falls back to stdout."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    calls = []
+    failed = _Result(False)
+    failed.stdout = _TOO_BIG
+    _fake_run(monkeypatch, [failed, _Result(True)], calls)
+    _snap().build_index("a.fa")
+    assert _location_sizes(calls) == ["4", "5"]
 
 
 def test_partial_index_is_removed_between_attempts(tmp_path, monkeypatch):
