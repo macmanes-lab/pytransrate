@@ -38,6 +38,22 @@ def _rc(seq):
     return seq.translate(COMP)[::-1]
 
 
+def _piped(name):
+    """``tx3`` -> ``GADU00000003``, an accession-shaped stand-in.
+
+    Zero-padded so the accessions sort in the same order as the transcripts
+    they stand for, which keeps the name-ordered tie-break in assign.py
+    (score, then prior, then name) deciding multi-mappers the same way in
+    both runs -- tx0 against its near-duplicate tx11, in practice.
+    """
+    return f"GADU{int(name[2:]):08d}"
+
+
+def _unpiped(identifier):
+    """``ENA|GADU00000003|GADU00000003.1`` -> ``tx3``."""
+    return f"tx{int(identifier.split('|')[1][4:])}"
+
+
 @pytest.fixture(scope="module")
 def dataset(tmp_path_factory):
     """A small transcriptome with a planted near-duplicate and a dead contig."""
@@ -155,6 +171,84 @@ def gzipped_run_output(dataset):
             f"transrate failed on gzipped input:\n{result.stdout}\n{result.stderr}"
         )
     return out
+
+
+@pytest.fixture(scope="module")
+def piped_run_output(dataset):
+    """The same run with ENA/TSA-style deflines.
+
+    Every transcript is renamed to the shape an ENA or TSA download has --
+    ``>ENA|GADU00000003|GADU00000003.1 Gadus morhua mRNA``, two pipes and a
+    description. Cutting the identifier at the first ``|``, as the Ruby did,
+    named every contig ``ENA``; cutting only at the space is what snap
+    writes into the BAM header and what salmon reports, and this is the only
+    test that asks the binaries rather than taking that on trust.
+    """
+    work = dataset["dir"] / "piped"
+    work.mkdir(exist_ok=True)
+
+    fasta = work / "assembly.fa"
+    fasta.write_text(
+        "".join(
+            f">ENA|{_piped(n)}|{_piped(n)}.1 Gadus morhua mRNA\n{s}\n"
+            for n, s in dataset["transcripts"].items()
+        )
+    )
+
+    out = work / "out"
+    result = subprocess.run(
+        [
+            sys.executable, "-m", "pytransrate.cli",
+            "-o", str(out),
+            "-t", "2",
+            "-a", str(fasta),
+            "--left", str(dataset["left"]),
+            "--right", str(dataset["right"]),
+        ],
+        cwd=work,
+        capture_output=True,
+        text=True,
+        env=_env(),
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            f"transrate failed on piped identifiers:\n"
+            f"{result.stdout}\n{result.stderr}"
+        )
+    return out
+
+
+def test_piped_identifiers_keep_their_pipes(piped_run_output, dataset):
+    rows = list(csv.reader(open(piped_run_output / "contigs.csv")))
+    names = {row[0] for row in rows[1:]}
+    assert names == {
+        f"ENA|{_piped(n)}|{_piped(n)}.1" for n in dataset["transcripts"]
+    }
+
+
+def test_piped_identifiers_still_join_to_the_bam(piped_run_output, run_output):
+    """The failure this guards is silent: names that match nothing in the
+    BAM header produce a full contigs.csv of zeroes rather than an error."""
+    def by_name(directory):
+        rows = list(csv.reader(open(directory / "contigs.csv")))
+        header = rows[0]
+        return {
+            row[0]: dict(zip(header, row)) for row in rows[1:]
+        }
+
+    piped = by_name(piped_run_output)
+    plain = by_name(run_output)
+
+    # Every contig was given reads, so a zero here is the join failing.
+    assert all(float(row["coverage"]) > 0 for row in piped.values())
+
+    # And the scores are unchanged: only the names differ, and _piped keeps
+    # them in an order the name-ordered tie-break decides the same way.
+    # Compared the way the gzip test compares them, on score alone -- snap
+    # and salmon are both multithreaded and promise no more than that.
+    assert {
+        _unpiped(name): row["score"] for name, row in piped.items()
+    } == {name: row["score"] for name, row in plain.items()}
 
 
 def test_gzipped_input_scores_identically(run_output, gzipped_run_output):

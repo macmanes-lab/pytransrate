@@ -122,8 +122,8 @@ def test_contigs_csv_round_trip(tmp_path, assembly):
         assert 0.0 < float(row[8]) <= 1.0
 
 
-def test_contig_names_are_split_on_space_and_pipe(assembly):
-    assert [name for name, _ in assembly] == ["c1", "c2"]
+def test_contig_names_are_split_on_space_only(assembly):
+    assert [name for name, _ in assembly] == ["c1", "c2|withpipe"]
 
 
 def test_assemblies_csv_round_trip(tmp_path):

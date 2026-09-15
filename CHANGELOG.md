@@ -46,6 +46,28 @@ Python and **does not reproduce their scores** — see *Changed* below.
 
 ### Fixed
 
+- **Contig names are no longer cut at the first `|`.** They are taken from
+  the defline up to the first space, which is the rule snap-aligner and
+  salmon apply when they take a reference name from a FASTA.
+
+  The Ruby cut at `|` as well, following BioRuby's `entry_id`, and so did
+  this port. That made any assembly with pipes in its deflines unusable
+  twice over. ENA and TSA downloads — `>ENA|GADU01000001|GADU01000001.1
+  Gadus morhua mRNA` — collapse to the single identifier `ENA` and were
+  rejected with `Non-unique fasta identifier found: >ENA` before any work
+  started. Worse, an assembly whose truncated names did happen to stay
+  unique ran to completion and matched nothing in the BAM header or in
+  salmon's `Name` column, so every read metric in `contigs.csv` came back
+  zero with no error anywhere.
+
+  Assemblies without pipes — Trinity, rnaSPAdes, the ORP's merged output —
+  are unaffected: their names never contained one to cut at. The duplicate
+  check and its message remain, for deflines that genuinely collide in
+  their first field. The pipeline test now runs the same dataset a second
+  time under ENA-style deflines and asserts the scores match the plain-named
+  run contig for contig, so the join is checked against the binaries rather
+  than taken on trust.
+
 - **A `-locationSize` failure now reports what is actually filling the
   genome.** snap sizes a genome as `fileSize + (nContigs + 1) * padding` and
   applies the ceiling to that total, so on a fragmented transcriptome most of

@@ -15,7 +15,13 @@ from collections import OrderedDict
 from pytransrate.compression import open_text
 from pytransrate.contig import Contig
 
-__all__ = ["AssemblyError", "Assembly", "BASIC_STATS_KEYS", "CONTIG_METRICS_KEYS"]
+__all__ = [
+    "AssemblyError",
+    "Assembly",
+    "contig_id",
+    "BASIC_STATS_KEYS",
+    "CONTIG_METRICS_KEYS",
+]
 
 
 class AssemblyError(Exception):
@@ -49,12 +55,31 @@ MIN_CONTIG_LENGTH = 200
 MIN_ORF_CODONS = 149
 
 
+def contig_id(defline):
+    """The contig name a defline denotes: everything up to the first space.
+
+    This is the rule snap-aligner and salmon apply when they take a
+    reference name from a FASTA, so the keys of :class:`Assembly` are the
+    names that come back in the BAM header and in salmon's ``Name`` column,
+    and the two sides join without any further cleaning.
+
+    The Ruby cut at the first ``|`` as well, following BioRuby's
+    ``entry_id``, and so did this port. The aligners do not, which made
+    every pipe-bearing assembly unusable twice over: ENA and TSA deflines
+    (``>ENA|GADU01000001|GADU01000001.1 Gadus morhua``) collapse to the
+    single identifier ``ENA`` and were rejected as non-unique, and any
+    assembly whose truncated names did happen to be unique silently matched
+    nothing in the BAM, so every read metric came back zero.
+    """
+    fields = defline.split()
+    return fields[0] if fields else ""
+
+
 def parse_fasta(path):
     """Yield ``(name, sequence)``.
 
-    The identifier is everything up to the first whitespace or ``|``,
-    matching BioRuby's ``entry_id``, which is what the Ruby used for contig
-    names.
+    The identifier is everything up to the first whitespace; see
+    :func:`contig_id`.
 
     Gzipped FASTA is read directly; see :mod:`pytransrate.compression`.
     """
@@ -68,9 +93,7 @@ def parse_fasta(path):
             if line.startswith(">"):
                 if name is not None:
                     yield name, "".join(chunks)
-                defline = line[1:].strip()
-                token = defline.split()[0] if defline else ""
-                name = token.split("|")[0]
+                name = contig_id(line[1:].strip())
                 chunks = []
             else:
                 chunks.append(line.strip())
@@ -94,8 +117,9 @@ class Assembly:
             if contig.name in self.contigs:
                 raise AssemblyError(
                     f"Non-unique fasta identifier found: >{contig.name}\n"
-                    "Contig names are taken from before the first | or space. "
-                    "If you used Trinity, replace | with _ in the identifiers."
+                    "Contig names are taken from before the first space, so "
+                    "two contigs whose deflines differ only after a space "
+                    "collide. Make the first field unique."
                 )
             if "," in contig.name:
                 raise AssemblyError("Contig names can't contain commas")

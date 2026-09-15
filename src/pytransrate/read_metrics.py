@@ -18,6 +18,7 @@ from collections import OrderedDict
 import numpy as np
 import pysam
 
+from pytransrate.assembly import contig_id
 from pytransrate.assign import assign_decoded
 from pytransrate.bam_metrics import (
     MalformedRecordStats,
@@ -612,7 +613,9 @@ class ReadMetrics:
     def _analyse_expression(self, expression) -> None:
         """Attach salmon's estimates and derive mean coverage."""
         for name, values in (expression or {}).items():
-            contig_name = name.split()[0].split("|")[0].rstrip(";")
+            # The same rule the assembly was keyed by, so a name carrying
+            # pipes or a description still finds its contig. See contig_id.
+            contig_name = contig_id(name)
             if contig_name not in self.assembly:
                 continue
             contig = self.assembly[contig_name]

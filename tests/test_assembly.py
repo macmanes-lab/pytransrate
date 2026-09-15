@@ -29,9 +29,24 @@ def test_parses_multiline_sequences(tmp_path):
     assert list(parse_fasta(path)) == [("c1", "ACGTACGT"), ("c2", "TTTT")]
 
 
-def test_identifier_stops_at_whitespace_or_pipe(tmp_path):
-    path = _write(tmp_path, ">c1 a description here\nACGT\n>c2|x|y\nACGT\n")
+def test_identifier_stops_at_whitespace(tmp_path):
+    path = _write(tmp_path, ">c1 a description here\nACGT\n>c2\tdesc\nACGT\n")
     assert [n for n, _ in parse_fasta(path)] == ["c1", "c2"]
+
+
+def test_pipes_are_kept_in_the_identifier(tmp_path):
+    # ENA and TSA deflines: cutting at the first '|' left every contig
+    # called 'ENA', and named nothing snap would put in a BAM header.
+    path = _write(
+        tmp_path,
+        ">ENA|GADU01000001|GADU01000001.1 Gadus morhua mRNA\nACGT\n"
+        ">ENA|GADU01000002|GADU01000002.1 Gadus morhua mRNA\nTTTT\n",
+    )
+    assert [n for n, _ in parse_fasta(path)] == [
+        "ENA|GADU01000001|GADU01000001.1",
+        "ENA|GADU01000002|GADU01000002.1",
+    ]
+    assert len(Assembly(path)) == 2
 
 
 def test_empty_sequence_is_rejected(tmp_path):
@@ -41,8 +56,8 @@ def test_empty_sequence_is_rejected(tmp_path):
 
 
 def test_duplicate_identifiers_are_rejected(tmp_path):
-    # The Trinity '|' bug: two deflines collapsing to one identifier.
-    path = _write(tmp_path, ">c1|a\nACGT\n>c1|b\nTTTT\n")
+    # Two deflines collapsing to one identifier at the first space.
+    path = _write(tmp_path, ">c1 first\nACGT\n>c1 second\nTTTT\n")
     with pytest.raises(AssemblyError, match="Non-unique"):
         Assembly(path)
 
