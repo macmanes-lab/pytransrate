@@ -503,6 +503,11 @@ def analyse_assembly(assembly_path, args, result_dir: Path) -> dict:
     if not args.keep_bam and os.path.exists(bam):
         os.remove(bam)
 
+    # Releases the index lock; see INDEX_LOCK in pytransrate.mapper. On the
+    # error paths the kernel does it when the process exits, which is the
+    # next thing that happens -- an assembly that raises aborts the run.
+    snap.close()
+
     return result
 
 

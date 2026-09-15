@@ -28,7 +28,57 @@ Python and **does not reproduce their scores** — see *Changed* below.
   Scores are unaffected — the pipeline test asserts a gzipped run reproduces
   an uncompressed one contig for contig.
 
+- **`logs/snap.log` is now written as snap runs**, and covers indexing as
+  well as mapping. It was assembled in memory and written once snap returned,
+  so the runs whose log is actually wanted — snap killed by an OOM killer or
+  a scheduler wall clock, or a `^C` — left no log at all. snap now writes
+  straight to the file, which survives anything short of the machine going
+  away. Each entry is preceded by the command that produced it, so a sweep
+  across several `-locationSize` values stays readable, and errors raised out
+  of the mapping step quote the tail of the output and name the log rather
+  than reproducing snap's whole progress table.
+
+  A snap that dies on a signal now says so by name — `killed by signal 8
+  (SIGFPE)` rather than `exit -8` — and says which way to look: a crash
+  points at the multiple-alignment flags (see MULTI_ALIGNMENT_SETTINGS),
+  whereas a SIGKILL or SIGTERM points at the job's memory ceiling or wall
+  clock instead.
+
 ### Fixed
+
+- **A `-locationSize` failure now reports what is actually filling the
+  genome.** snap sizes a genome as `fileSize + (nContigs + 1) * padding` and
+  applies the ceiling to that total, so on a fragmented transcriptome most of
+  what overflows is padding rather than assembly — at 5.4M contigs the default
+  padding alone is 10.7 Gbp against a 4-byte ceiling of 4.29 Gbp. The warning
+  now gives the FASTA size, the contig count, the padding's share of the
+  total, and the ceiling, so `--padding` is visible as the lever it is.
+  Computed once per build and only on the failure path.
+
+- **A completed index is never deleted by the `-locationSize` sweep.** The
+  sweep clears the directory before retrying at a larger size, which is right
+  for the partial build it just made and wrong for a finished index that was
+  already there. It now refuses and says so instead. Reuse and rebuild are
+  also logged at INFO with the resolved path, because they were
+  indistinguishable in a log: the reuse branch returned silently, so a run
+  that rebuilt an index it should have reused looked exactly like a first run.
+
+- **An index build that exits 0 without writing an index is now caught.** snap
+  can do this — it is the same silent failure the mapping step already guards
+  against — and mapping against an index that is not there dies with nothing
+  but snap's version banner, which is very hard to read backwards. The build
+  checks for `GenomeIndex` before reporting success.
+
+- **An index is no longer deleted while another run is aligning against it.**
+  The index directory is named after the assembly, so two runs of the same
+  assembly into the same output directory shared it; if the second reached
+  the `-locationSize` retry — the one place an index is ever deleted — while
+  the first was already mapping, snap lost its genome mid-alignment. An
+  exclusive `flock` is now held on `<assembly>.index.lock` beside the
+  directory, from the start of the index build until the run is done mapping,
+  and the second run stops with a message naming the lock instead. The kernel
+  drops the lock when the holder dies, so a killed run leaves nothing to
+  clean up by hand.
 
 - The `-locationSize` sweep now runs on every way snap reports that the
   location size is too small. It matched two of snap's four messages, so a

@@ -14,10 +14,12 @@ What is *not* unchanged is the output: see SOFT_CLIPPING below.
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import os
 import shutil
 import re
+import signal
 from pathlib import Path
 
 from pytransrate.cmd import CommandError, run, which
@@ -60,6 +62,34 @@ _LOCATION_SIZES = range(4, 9)
 #: not proof of a usable index -- a build that died partway leaves the
 #: directory behind with some of its files.
 _INDEX_MARKER = "GenomeIndex"
+
+#: Everything snap-aligner says, indexing and mapping alike, as it says it.
+#: Relative: the CLI chdirs into the result directory, so each assembly gets
+#: its own.
+LOG_PATH = Path("logs") / "snap.log"
+
+# ---------------------------------------------------------------------------
+# INDEX_LOCK
+#
+# The index lives in a directory named after the assembly, so two runs of the
+# same assembly into the same output directory share it.  Only one code path
+# ever deletes an index -- build_index clearing a partial build before
+# retrying at a larger -locationSize -- but that is enough: if the second run
+# reaches it while the first is already mapping, snap-aligner loses its
+# genome mid-alignment.
+#
+# So an exclusive lock is taken before the directory is touched and held
+# until the Snap object is closed, which covers mapping as well as building.
+# flock is released by the kernel when the holder dies, so a killed run
+# cannot leave a lock behind for the next one to trip over -- which a lock
+# file tested with O_EXCL would.
+#
+# The lock sits beside the index rather than inside it, because rmtree would
+# otherwise delete the file out from under its own holder and the next
+# process would happily lock a fresh inode.
+# ---------------------------------------------------------------------------
+
+_LOCK_SUFFIX = ".index.lock"
 
 # ---------------------------------------------------------------------------
 # MAX_CANDIDATE_POOL
@@ -304,8 +334,110 @@ _UNMATCHED_IDS = re.compile(r"Unmatched\s+read\s+IDs\s+(.*?)\s+and\s+(.*?)Use", 
 _BAD_OPTIONS = re.compile(r"Didn't understand options starting at (.*)")
 
 
+#: snap's ceiling on a 4-byte location: InvalidGenomeLocation, less the
+#: sentinel slack GenomeIndex.cpp leaves above it.
+_FOUR_BYTE_CEILING = 2 ** 32 - 16
+
+
+def _count_contigs(fasta: Path) -> int:
+    """'>' at the start of a line, counted without holding the file."""
+    count = 0
+    last = b"\n"
+    with open(fasta, "rb") as handle:
+        while chunk := handle.read(1 << 22):
+            if last == b"\n" and chunk[:1] == b">":
+                count += 1
+            count += chunk.count(b"\n>")
+            last = chunk[-1:]
+    return count
+
+
+def _padding_report(fasta: Path, padding: int) -> str:
+    """How much of the genome snap is measuring is padding, not assembly.
+
+    snap sizes the genome as ``fileSize + (nContigs + 1) * padding``
+    (FASTA.cpp) and applies the location-size ceiling to that total, so on a
+    fragmented transcriptome the padding is routinely several times the
+    assembly.  Without this the user sees only that four bytes were not
+    enough, and reaches for --seed-size or a bigger machine when --padding is
+    the term actually driving the number.
+
+    Computed only on the failure path: it reads the whole FASTA, which is
+    nothing beside the index build it is explaining, but is not free.
+    """
+    try:
+        file_size = fasta.stat().st_size
+        contigs = _count_contigs(fasta)
+    except OSError:
+        return ""
+
+    pad_bases = (contigs + 1) * padding
+    genome = file_size + pad_bases
+    if not genome:
+        return ""
+    return (
+        f"snap measures this genome as {file_size / 1e9:.2f} GB of FASTA "
+        f"(it counts the file's bytes, headers and newlines included) plus "
+        f"{contigs:,} contigs x {padding} bp of padding "
+        f"({pad_bases / 1e9:.2f} Gbp) = {genome / 1e9:.2f} Gbp, "
+        f"{100.0 * pad_bases / genome:.0f}% of it padding; the 4-byte "
+        f"ceiling is {_FOUR_BYTE_CEILING / 1e9:.2f} Gbp. Padding is inert Ns "
+        f"and still costs index and memory, so --padding is usually the "
+        f"cheaper lever: its floor is the read length plus --edit-distance, "
+        f"below which an alignment could cross from one contig into the next."
+    )
+
+
+def _how_it_died(returncode: int) -> str:
+    """Describe a return code, naming the signal when there was one.
+
+    subprocess reports a signal death as a negative return code, and "-8" on
+    its own tells a user nothing.  The distinction is worth spelling out:
+    a non-zero exit is snap declining to do something and usually saying why,
+    whereas a signal is snap crashing, where the flags that provoked it are
+    the only evidence there is.
+    """
+    if returncode >= 0:
+        return f"exit {returncode}"
+    try:
+        name = signal.Signals(-returncode).name
+    except ValueError:
+        name = "unrecognised signal"
+    note = ""
+    if -returncode in (signal.SIGFPE, signal.SIGSEGV, signal.SIGBUS, signal.SIGILL):
+        # See MULTI_ALIGNMENT_SETTINGS: snap 2.0.5 is known to crash rather
+        # than complain on large, redundant assemblies, and it is the
+        # multiple-alignment flags that provoke it.
+        note = (
+            " -- snap crashed rather than reporting an error, which on a large "
+            "assembly is usually the multiple-alignment path: try lowering "
+            "--max-alignments-per-pair and --max-seed-hits"
+        )
+    elif -returncode in (signal.SIGKILL, signal.SIGTERM):
+        note = (
+            " -- something outside snap stopped it; check the job's memory "
+            "ceiling and wall clock rather than its flags"
+        )
+    return f"killed by signal {-returncode} ({name}){note}"
+
+
+def _tail(text: str, lines: int = 40) -> str:
+    """The last few lines of a command's output.
+
+    snap prints a progress table and a version banner before it says what
+    went wrong, and an exception carrying all of it buries the message. The
+    whole thing is in LOG_PATH either way.
+    """
+    kept = text.strip().splitlines()[-lines:]
+    return "\n".join(kept)
+
+
 class Snap:
-    """Builds a snap index and maps paired reads against it."""
+    """Builds a snap index and maps paired reads against it.
+
+    Holds an exclusive lock on the index directory from :meth:`build_index`
+    until :meth:`close`; see INDEX_LOCK. Usable as a context manager.
+    """
 
     def __init__(self, binary: str | None = None):
         self.binary = binary or which("snap-aligner")
@@ -314,8 +446,47 @@ class Snap:
         self.bam: str | None = None
         self.read_count: int = 0
         self._read_count_file: str | None = None
+        self._lock = None
+
+    def close(self) -> None:
+        """Release the index lock. See INDEX_LOCK."""
+        if self._lock is not None:
+            self._lock.close()   # closing drops the flock
+            self._lock = None
+
+    def __enter__(self) -> "Snap":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
 
     # -- index ------------------------------------------------------------
+
+    def _lock_index(self, index_dir: Path) -> None:
+        """Claim the index directory for this process. See INDEX_LOCK."""
+        if self._lock is not None:
+            return
+        lock_path = index_dir.parent / f"{index_dir.name}{_LOCK_SUFFIX}"
+        # Opened without truncating, so the holder's pid is still readable
+        # when the lock is refused.
+        handle = os.fdopen(os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644), "r+")
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            held_by = handle.read().strip() or "another process"
+            handle.close()
+            raise SnapError(
+                f"the snap index {index_dir} is in use by pid {held_by} "
+                f"(lock: {lock_path}). Two runs of the same assembly in one "
+                f"output directory share an index, and the second can delete "
+                f"it while the first is still mapping. Give this run its own "
+                f"-o directory, or wait for the other to finish."
+            ) from None
+        handle.seek(0)
+        handle.truncate()
+        handle.write(f"{os.getpid()}\n")
+        handle.flush()
+        self._lock = handle
 
     def build_index(
         self,
@@ -356,12 +527,25 @@ class Snap:
         fasta = Path(fasta)
         self.index_name = fasta.stem
         index_dir = Path(self.index_name)
+        self._lock_index(index_dir)
 
         # Require the marker, not just the directory: a build killed partway
         # leaves the directory behind, and trusting it yields a corrupt index.
         if (index_dir / _INDEX_MARKER).exists():
+            logger.info("reusing snap index %s", index_dir.resolve())
             self.index_built = True
             return self.index_name
+
+        # Logged at INFO, not DEBUG: an index build is the longest step in a
+        # run and rebuilding one that should have been reused is invisible
+        # otherwise -- the reuse branch above returns without a word, so a log
+        # that jumps straight to the -locationSize sweep looks identical
+        # whether the index was missing or was deleted between runs.
+        logger.info(
+            "no snap index at %s (looked for %s); building one",
+            index_dir.resolve(),
+            _INDEX_MARKER,
+        )
 
         if location_size is not None:
             if location_size not in _LOCATION_SIZES:
@@ -383,28 +567,71 @@ class Snap:
                 f"-p{padding}",         # see CONTIG_PADDING
                 "-locationSize", size,
             ]
-            result = run(args)
+            result = run(args, log_path=LOG_PATH)
             if result.ok:
+                # SILENT_OPTION_REJECTION applies to indexing too: snap can
+                # exit 0 having written nothing, and mapping against an index
+                # that is not there dies with no more than snap's banner --
+                # which is a much harder thing to read than this message.
+                if not (index_dir / _INDEX_MARKER).exists():
+                    raise SnapError(
+                        f"snap-aligner exited successfully but wrote no index "
+                        f"at {index_dir.resolve()} (no {_INDEX_MARKER}).\n"
+                        f"command: {' '.join(str(a) for a in args)}\n"
+                        f"{_tail(result.output)}"
+                    )
+                logger.info(
+                    "snap index built at -locationSize %d: %s",
+                    size,
+                    index_dir.resolve(),
+                )
                 self.index_built = True
                 return self.index_name
 
             last_error = result.stderr or result.stdout
             if any(p.search(last_error) for p in _LOCATION_SIZE_PATTERNS):
                 # Clear the partial index before retrying. rmdir() will not
-                # do -- snap leaves Genome, GenomeIndex, GenomeIndexHash and
-                # OverflowTable behind, and rmdir only removes empty dirs.
+                # do -- snap leaves Genome, GenomeIndexHash and OverflowTable
+                # behind, and rmdir only removes empty dirs.
+                #
+                # Never a complete one, though: this deletes the longest
+                # piece of work in a run, and an index carrying the marker
+                # belongs to whoever built it.  The check at the top of
+                # build_index should already have returned in that case, so
+                # reaching here means something is wrong -- say so rather
+                # than destroying the index and rebuilding it next run.
+                if (index_dir / _INDEX_MARKER).exists():
+                    raise SnapError(
+                        f"snap says the location size is too small, but "
+                        f"{index_dir.resolve()} holds a complete index. "
+                        f"Refusing to delete it. Remove it by hand if it is "
+                        f"stale, or pass --location-size to skip the sweep."
+                        f"\n{_tail(last_error)}"
+                    )
                 if index_dir.is_dir():
                     shutil.rmtree(index_dir, ignore_errors=True)
+                if size == sizes[0]:
+                    # Once per build, not once per attempt: the figures do
+                    # not change as the sweep climbs, and reading the FASTA
+                    # again for each would not be free.
+                    report = _padding_report(fasta, padding)
+                    if report:
+                        logger.warning("%s", report)
                 if size == sizes[-1]:
                     break
                 logger.warning(
                     "snap ran out of genome locations at -locationSize %d, "
-                    "retrying at %d",
+                    "retrying at %d (a full rebuild, and a larger index for "
+                    "the rest of the run)",
                     size,
                     size + 1,
                 )
                 continue
-            raise SnapError(f"Failed to build snap index\n{last_error}")
+            raise SnapError(
+                f"Failed to build snap index: "
+                f"{_how_it_died(result.returncode)}. "
+                f"Full output in {LOG_PATH.resolve()}\n{_tail(last_error)}"
+            )
 
         hint = (
             " Every location size from "
@@ -504,13 +731,12 @@ class Snap:
             max_alignments_per_contig=max_alignments_per_contig,
             max_candidate_pool=max_candidate_pool,
         )
-        result = run(args)
-        self._save_read_count(result.stdout)
-        self._save_logs(result.stdout, result.stderr)
+        result = run(args, log_path=LOG_PATH)
+        self._save_read_count(result.output)
 
         # SILENT_OPTION_REJECTION: check this before the exit code, because
         # snap returns 0 in this case.
-        bad_options = _BAD_OPTIONS.search(result.stdout + result.stderr)
+        bad_options = _BAD_OPTIONS.search(result.output)
         if bad_options:
             raise SnapError(
                 "snap-aligner rejected an option and produced no alignments: "
@@ -519,7 +745,7 @@ class Snap:
             )
 
         if not result.ok:
-            match = _UNMATCHED_IDS.search(result.stderr)
+            match = _UNMATCHED_IDS.search(result.output)
             if match:
                 raise SnapError(
                     "snap found unmatched read IDs in the input fastq files.\n"
@@ -527,25 +753,22 @@ class Snap:
                     f"and right files contained read id\n{match.group(2).strip()}\n"
                     "at the same position in the file."
                 )
-            raise SnapError(f"snap failed\n{result.stderr}")
+            raise SnapError(
+                f"snap failed: {_how_it_died(result.returncode)}. "
+                f"Full output in {LOG_PATH.resolve()}\n{_tail(result.output)}"
+            )
 
         # snap can exit 0 having written nothing; see SILENT_OPTION_REJECTION.
         if not os.path.exists(self.bam) or os.path.getsize(self.bam) == 0:
             raise SnapError(
                 f"snap-aligner exited successfully but produced no alignments "
                 f"at {self.bam}\ncommand: "
-                f"{' '.join(str(a) for a in args)}\n{result.stderr}"
+                f"{' '.join(str(a) for a in args)}\n{_tail(result.output)}"
             )
 
         return self.bam
 
     # -- read counting ----------------------------------------------------
-
-    def _save_logs(self, stdout: str, stderr: str) -> None:
-        Path("logs").mkdir(exist_ok=True)
-        with open("logs/snap.log", "a") as handle:
-            handle.write(stdout)
-            handle.write(stderr)
 
     def _save_read_count(self, stdout: str) -> None:
         """Pull the total read count out of snap's summary table.

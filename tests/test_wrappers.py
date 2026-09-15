@@ -8,6 +8,7 @@ against the real binaries lives in tests/test_pipeline.py.
 from __future__ import annotations
 
 import gzip
+import os
 from pathlib import Path
 
 import pytest
@@ -299,8 +300,13 @@ def test_read_paths_are_absolutised(tmp_path, monkeypatch):
 class _Result:
     def __init__(self, ok, stderr=""):
         self.ok = ok
+        self.returncode = 0 if ok else 1
         self.stderr = stderr
         self.stdout = ""
+
+    @property
+    def output(self):
+        return self.stdout + self.stderr
 
 
 _OVERFLOW = (
@@ -356,6 +362,7 @@ def _snap():
     obj.bam = None
     obj.read_count = 0
     obj._read_count_file = None
+    obj._lock = None
     return obj
 
 
@@ -670,6 +677,7 @@ def _mapping_snap(tmp_path, monkeypatch, result, write_bam=True, size=10):
     obj.bam = None
     obj.read_count = 0
     obj._read_count_file = None
+    obj._lock = None
     monkeypatch.chdir(tmp_path)
     return obj
 
@@ -912,3 +920,211 @@ def test_reported_values_match_the_csv_rounding():
     assert format_metric(0.8624231) == "0.86242"
     assert format_metric(28976658) == "28,976,658"
     assert format_metric(0) == "0"
+
+
+# ---------------------------------------------------------------------------
+# LIVE_LOGGING and INDEX_LOCK
+# ---------------------------------------------------------------------------
+
+
+def test_log_path_records_the_command_and_both_streams(tmp_path):
+    log = tmp_path / "logs" / "snap.log"
+    result = run(
+        ["sh", "-c", "echo to-stdout; echo to-stderr >&2; exit 3"], log_path=log
+    )
+
+    assert result.returncode == 3
+    assert "to-stdout" in result.output and "to-stderr" in result.output
+    written = log.read_text()
+    assert "to-stdout" in written and "to-stderr" in written
+    assert written.startswith("$ sh -c ")
+
+
+def test_log_survives_a_command_that_is_killed(tmp_path):
+    """The whole point: an OOM-killed snap still explains itself.
+
+    capture_output loses everything here, which is why the child is handed a
+    file descriptor instead.
+    """
+    log = tmp_path / "logs" / "snap.log"
+    result = run(["sh", "-c", "echo got-this-far; kill -9 $$"], log_path=log)
+
+    assert not result.ok
+    assert "got-this-far" in log.read_text()
+    assert "got-this-far" in result.output
+
+
+def test_log_appends_rather_than_replacing_earlier_runs(tmp_path):
+    """build_index can run snap five times; each must stay readable."""
+    log = tmp_path / "logs" / "snap.log"
+    run(["echo", "first"], log_path=log)
+    second = run(["echo", "second"], log_path=log)
+
+    assert "first" in log.read_text()
+    # ...but only this run's output comes back, or the read count would be
+    # parsed out of a previous run's summary table.
+    assert "first" not in second.output
+    assert "second" in second.output
+
+
+def test_a_second_run_cannot_delete_an_index_in_use(tmp_path, monkeypatch):
+    """INDEX_LOCK: the loser is told to move, not left to trample."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    calls = []
+    _fake_run(monkeypatch, [_Result(True), _Result(True)], calls)
+
+    first = _snap()
+    first.build_index("a.fa")
+
+    with pytest.raises(Exception, match=f"in use by pid {os.getpid()}"):
+        _snap().build_index("a.fa")
+
+    # Whatever the second run wanted, it did not get as far as snap.
+    assert len(calls) == 1
+
+
+def test_closing_hands_the_index_to_the_next_run(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    _fake_run(monkeypatch, [_Result(True), _Result(True)], [])
+
+    first = _snap()
+    first.build_index("a.fa")
+    first.close()
+
+    second = _snap()
+    assert second.build_index("a.fa") == "a"
+
+
+def test_the_lock_sits_outside_the_index_directory(tmp_path, monkeypatch):
+    """rmtree would otherwise delete the lock its own holder is holding,
+    and the next process would lock a fresh inode unopposed."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    _fake_run(monkeypatch, [_Result(True)], [])
+
+    _snap().build_index("a.fa")
+
+    assert (tmp_path / "a.index.lock").exists()
+    assert not (tmp_path / "a" / "a.index.lock").exists()
+
+
+def test_exit_zero_without_an_index_is_not_success(tmp_path, monkeypatch):
+    """snap can exit 0 having written nothing; mapping against the index
+    that isn't there dies with nothing but snap's banner."""
+    import pytransrate.mapper as mapper
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    monkeypatch.setattr(mapper, "run", lambda args, **kw: _Result(True))
+
+    with pytest.raises(Exception, match="wrote no index"):
+        _snap().build_index("a.fa")
+
+
+def test_a_complete_index_is_never_deleted_by_the_sweep(tmp_path, monkeypatch):
+    """The sweep's cleanup must not take the longest piece of work in a run."""
+    import pytransrate.mapper as mapper
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+
+    def fake(args, **kwargs):
+        index_dir = Path(str(args[3]))
+        index_dir.mkdir(exist_ok=True)
+        # A complete index appears under the sweep's feet -- a concurrent
+        # run, or a marker check that somehow did not fire.
+        (index_dir / "GenomeIndex").write_text("x")
+        return _Result(False, _OVERFLOW)
+
+    monkeypatch.setattr(mapper, "run", fake)
+
+    with pytest.raises(Exception, match="Refusing to delete"):
+        _snap().build_index("a.fa")
+    assert (tmp_path / "a" / "GenomeIndex").exists()
+
+
+def test_reuse_and_rebuild_are_both_logged(tmp_path, monkeypatch, caplog):
+    """A run that rebuilds an index it should have reused looks exactly like
+    a first run unless the decision is logged."""
+    import logging
+
+    import pytransrate.mapper as mapper
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c\nACGT\n")
+    _fake_run(monkeypatch, [_Result(True)], [])
+
+    with caplog.at_level(logging.INFO, logger="pytransrate"):
+        builder = _snap()
+        builder.build_index("a.fa")
+        first = "\n".join(r.getMessage() for r in caplog.records)
+        caplog.clear()
+        builder.close()          # hand the lock over deterministically
+        _snap().build_index("a.fa")
+        again = "\n".join(r.getMessage() for r in caplog.records)
+
+    assert "no snap index" in first and "built at -locationSize 4" in first
+    assert "reusing snap index" in again
+
+
+def test_location_size_failure_reports_the_padding_share(tmp_path, monkeypatch, caplog):
+    """--padding, not --seed-size, is usually the term driving the ceiling."""
+    import logging
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "a.fa").write_text(">c1\nACGT\n>c2\nACGT\n>c3\nACGT\n")
+    _fake_run(monkeypatch, [_Result(False, _TOO_BIG)] * 5, [])
+
+    with caplog.at_level(logging.WARNING, logger="pytransrate"):
+        with pytest.raises(Exception):
+            _snap().build_index("a.fa")
+    reported = "\n".join(r.getMessage() for r in caplog.records)
+
+    assert "3 contigs x 1000 bp of padding" in reported
+    assert "--padding" in reported
+    # Once per build, however many sizes the sweep tries.
+    assert reported.count("snap measures this genome") == 1
+
+
+def test_contigs_are_counted_across_read_boundaries(tmp_path):
+    """The count is chunked, so a '>' landing on a chunk edge must not be
+    missed or doubled."""
+    from pytransrate.mapper import _count_contigs
+
+    fasta = tmp_path / "a.fa"
+    fasta.write_text("".join(f">c{i}\n{'ACGT' * 500}\n" for i in range(2000)))
+    assert _count_contigs(fasta) == 2000
+
+
+def test_a_signal_death_is_named_not_left_as_a_negative_number(tmp_path, monkeypatch):
+    """"-8" tells nobody anything; SIGFPE points straight at snap."""
+    import pytransrate.mapper as mapper
+
+    result = _Result(False)
+    result.returncode = -8
+    snap = _mapping_snap(tmp_path, monkeypatch, result)
+
+    with pytest.raises(Exception, match="signal 8 .SIGFPE."):
+        snap.map_reads("l.fq", "r.fq")
+
+
+def test_a_kill_points_outward_rather_than_at_the_flags(tmp_path, monkeypatch):
+    import pytransrate.mapper as mapper
+
+    result = _Result(False)
+    result.returncode = -9
+    snap = _mapping_snap(tmp_path, monkeypatch, result)
+
+    with pytest.raises(Exception, match="memory ceiling and wall clock"):
+        snap.map_reads("l.fq", "r.fq")
+
+
+def test_a_plain_failure_still_reads_as_an_exit_code(tmp_path, monkeypatch):
+    result = _Result(False, "some snap complaint")
+    result.returncode = 1
+    snap = _mapping_snap(tmp_path, monkeypatch, result)
+
+    with pytest.raises(Exception, match="exit 1"):
+        snap.map_reads("l.fq", "r.fq")
