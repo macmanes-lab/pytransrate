@@ -409,9 +409,11 @@ def _how_it_died(returncode: int) -> str:
         # than complain on large, redundant assemblies, and it is the
         # multiple-alignment flags that provoke it.
         note = (
-            " -- snap crashed rather than reporting an error, which on a large "
-            "assembly is usually the multiple-alignment path: try lowering "
-            "--max-alignments-per-pair and --max-seed-hits"
+            " -- snap crashed rather than reporting an error, so the last "
+            "lines of the log are the evidence: they say whether it got as "
+            "far as loading the index or died partway through the reads. On "
+            "a large assembly this is usually the multiple-alignment path, "
+            "so try lowering --max-alignments-per-pair and --max-seed-hits"
         )
     elif -returncode in (signal.SIGKILL, signal.SIGTERM):
         note = (

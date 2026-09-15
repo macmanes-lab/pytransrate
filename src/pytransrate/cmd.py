@@ -7,6 +7,7 @@ shell, so paths containing spaces or shell metacharacters are safe.
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import shutil
@@ -133,7 +134,45 @@ def run(args, cwd=None, env=None, stdout_path=None, log_path=None) -> CommandRes
 # stdout and stderr share one descriptor, so the two interleave in the order
 # snap actually produced them.  The cost is that they can no longer be told
 # apart afterwards; see CommandResult.output.
+#
+# A file descriptor is not enough on its own, because the buffering that
+# swallows the output is in the *child*.  C stdio picks its mode from what
+# fd 1 turns out to be: a terminal gets line buffering, a pipe or a file gets
+# a 4-8 KB block buffer, flushed when it fills or at exit.  A process killed
+# by a signal never reaches exit, so whatever sits in that buffer -- up to the
+# last few thousand characters it printed, which is exactly the part saying
+# where it got to -- dies with it.
+#
+# This is not hypothetical.  A snap-aligner 2.0.5 run that took SIGFPE twenty
+# minutes into a merged assembly left a log containing one line:
+#
+#     Welcome to SNAP version 2.0.5.
+#
+# and nothing else.  That line survived only because snap writes its banner to
+# stderr, which C leaves unbuffered; every subsequent word -- the index load,
+# the bases indexed, the progress table saying how many reads had been
+# aligned -- went to stdout and was lost.  The run was unreconstructable:
+# nothing said whether it died loading the index or halfway through the reads,
+# which are different bugs with different workarounds.
+#
+# stdbuf sets the child's buffering from outside via LD_PRELOAD, so its stdio
+# is line buffered and each line reaches disk as it is printed.  It is
+# coreutils, so it is there on the Linux clusters these runs happen on and
+# generally absent on macOS; it is used when found and skipped when not, since
+# without it the log is merely as truncated as it already was.  It cannot help
+# a statically linked binary either, for the same LD_PRELOAD reason.
+#
+# The wrapper is prepended for the spawn only.  CommandResult.args keeps the
+# command the caller asked for, because those args are printed back to the
+# user in error messages as something to rerun by hand.
 # ---------------------------------------------------------------------------
+
+
+@functools.lru_cache(maxsize=1)
+def _line_buffered() -> tuple[str, ...]:
+    """``stdbuf`` prefix forcing line buffering, or empty if unavailable."""
+    path = shutil.which("stdbuf")
+    return (path, "-oL", "-eL") if path else ()
 
 
 def _run_logged(args, log_path, cwd, full_env) -> CommandResult:
@@ -148,7 +187,11 @@ def _run_logged(args, log_path, cwd, full_env) -> CommandResult:
         handle.write(f"$ {' '.join(args)}\n".encode())
         handle.flush()
         proc = subprocess.run(
-            args, cwd=cwd, env=full_env, stdout=handle, stderr=handle
+            [*_line_buffered(), *args],
+            cwd=cwd,
+            env=full_env,
+            stdout=handle,
+            stderr=handle,
         )
 
     with open(path, "rb") as handle:

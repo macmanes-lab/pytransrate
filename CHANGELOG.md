@@ -46,6 +46,23 @@ Python and **does not reproduce their scores** — see *Changed* below.
 
 ### Fixed
 
+- **A crashing snap no longer takes its own last words with it.** Writing the
+  log as snap ran was only half the problem: the buffering that swallowed the
+  output is in snap, not in pytransrate. C stdio block-buffers a few kilobytes
+  when its output is a file rather than a terminal and flushes at exit, and a
+  process killed by a signal never exits — so a snap-aligner 2.0.5 run that
+  took SIGFPE twenty minutes into a merged assembly left a log containing one
+  line, `Welcome to SNAP version 2.0.5.`, which survived only because snap
+  writes its banner to stderr. The index load, the bases indexed and the
+  progress table were all still sitting in the buffer, which is to say there
+  was no way to tell whether snap died loading the index or partway through
+  the reads.
+
+  snap is now run under `stdbuf -oL -eL` where coreutils provides it — every
+  Linux cluster, not macOS — so each line reaches the log as it is printed and
+  a crash leaves the position it crashed at. Where `stdbuf` is missing the run
+  proceeds unchanged, with the log no more truncated than it already was.
+
 - **Contig names are no longer cut at the first `|`.** They are taken from
   the defline up to the first space, which is the rule snap-aligner and
   salmon apply when they take a reference name from a FASTA.

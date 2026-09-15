@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import gzip
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
 
+from pytransrate import cmd
 from pytransrate.cmd import CommandError, CommandResult, run, which
 from pytransrate.mapper import Snap
 from pytransrate.quantify import Salmon, SalmonError, load_expression
@@ -952,6 +954,51 @@ def test_log_survives_a_command_that_is_killed(tmp_path):
     assert not result.ok
     assert "got-this-far" in log.read_text()
     assert "got-this-far" in result.output
+
+
+@pytest.fixture
+def spawned_command(monkeypatch):
+    """Record the argv _run_logged actually spawns, without spawning it."""
+    recorded = []
+
+    def fake_run(args, **kwargs):
+        recorded.append(args)
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(cmd.subprocess, "run", fake_run)
+    cmd._line_buffered.cache_clear()
+    yield recorded
+    cmd._line_buffered.cache_clear()
+
+
+def test_a_logged_child_is_line_buffered_so_a_crash_keeps_its_last_words(
+    tmp_path, monkeypatch, spawned_command
+):
+    """LIVE_LOGGING: the file descriptor is useless if the child buffers.
+
+    snap's account of a SIGFPE sat in its 4 KB stdio buffer and died with it,
+    leaving a log holding only the banner snap had written to stderr.
+    """
+    monkeypatch.setattr(cmd.shutil, "which", lambda name: f"/usr/bin/{name}")
+
+    result = run(["snap-aligner", "paired"], log_path=tmp_path / "snap.log")
+
+    assert spawned_command[0] == [
+        "/usr/bin/stdbuf", "-oL", "-eL", "snap-aligner", "paired",
+    ]
+    # ...but the command handed back to the user is one they can rerun.
+    assert result.args == ["snap-aligner", "paired"]
+
+
+def test_line_buffering_is_skipped_where_stdbuf_does_not_exist(
+    tmp_path, monkeypatch, spawned_command
+):
+    """macOS ships no stdbuf; the run proceeds, merely as mute as before."""
+    monkeypatch.setattr(cmd.shutil, "which", lambda name: None)
+
+    run(["snap-aligner", "paired"], log_path=tmp_path / "snap.log")
+
+    assert spawned_command[0] == ["snap-aligner", "paired"]
 
 
 def test_log_appends_rather_than_replacing_earlier_runs(tmp_path):
