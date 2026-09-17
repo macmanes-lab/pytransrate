@@ -57,6 +57,13 @@ Python and **does not reproduce their scores** — see *Changed* below.
 
 ### Added
 
+- **Notes on all of this**, since a memory ceiling nobody can see coming is
+  the kind of thing that gets rediscovered: `README.md` gains the per-process
+  figure and the resume behaviour, `USAGE.md` covers both ways to set the
+  budget and what the warning means, MEMORY_BUDGET in `read_metrics` records
+  why the accumulators are per-worker at all, and a test pins the warning
+  USAGE quotes to the one the code prints.
+
 - **`--max-memory SIZE`, also spelled `--mem SIZE`.** What the read-metrics
   step may use — `670G`, `512M`, or a bare number for GB (`670Gi` for GiB).
   Only needed where the detected figure is wrong, which is most likely on a

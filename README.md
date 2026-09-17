@@ -105,6 +105,20 @@ Gzipped inputs are read directly, in any combination:
 pytransrate -a assembly.fa.gz --left reads.1.fq.gz --right reads.2.fq.gz -o results
 ```
 
+**Memory, on a large assembly.** `-t` divides the read-metrics step across
+processes, and each one holds its own per-base coverage accumulators — about
+`4 * (n_bases + n_contigs)` bytes, which is 23 GB apiece on a 5.8 Gbp merged
+assembly. pytransrate works out what the machine allows (cgroup, Slurm
+allocation, `MemAvailable`) and caps the processes at what fits, rather than
+being killed hours in; `--max-memory 670G`, or `--mem 670`, overrides that
+where a scheduler enforces a limit none of those show. snap and salmon still
+use every thread.
+
+**A killed run resumes.** Rerunning the same command with the same `-o`
+reuses the snap index, the BAM and `salmon/quant.sf` — hours of work — and
+checks each one is whole before trusting it, since a killed process leaves
+files that parse but are short. Every decision is logged either way.
+
 **[USAGE.md](USAGE.md)** is the full reference: every option, what each metric
 means, how to read a score, tuning for large or repetitive assemblies, the
 comparison tooling, and troubleshooting.

@@ -192,3 +192,45 @@ def test_a_plain_integer_budget_is_the_flag(caplog):
     with caplog.at_level(logging.WARNING, logger="pytransrate"):
         _memory_capped_workers(40, 23 * GB, budget=670 * GB)
     assert "--max-memory setting is 670.0 GB" in caplog.text
+
+
+# -- the notes ------------------------------------------------------------
+
+
+def test_usage_quotes_the_warning_this_actually_prints():
+    """USAGE.md quotes the capping warning verbatim, and a quote that has
+    drifted from the code is worse than no quote: it is the line someone
+    greps their log for.  This pins the two together."""
+    import re
+    from pathlib import Path
+
+    from pytransrate.memory import Budget
+
+    usage = Path(__file__).resolve().parents[1] / "USAGE.md"
+    if not usage.exists():        # an installed copy without the docs
+        pytest.skip("USAGE.md is not part of this checkout")
+
+    quoted = re.search(
+        r"\[ WARN\] (40 processes would need.*?)\n```", usage.read_text(), re.S
+    )
+    assert quoted, "USAGE.md no longer quotes the capping warning"
+
+    records: list[str] = []
+
+    class _Grab(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    log = logging.getLogger("pytransrate")
+    handler = _Grab()
+    log.addHandler(handler)
+    try:
+        _memory_capped_workers(
+            40,
+            int(927.7e9 / 40),
+            budget=Budget(720 * (1 << 30), "Slurm allocation"),
+        )
+    finally:
+        log.removeHandler(handler)
+
+    assert " ".join(quoted.group(1).split()) == records[-1]

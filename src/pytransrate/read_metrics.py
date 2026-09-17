@@ -123,7 +123,11 @@ _READ_LENGTH_SAMPLE = 5000
 # fix is not to refuse it but to spend it on what fits: the workers are
 # capped at what the memory budget allows, and the run says so and carries
 # on. The budget comes from the cgroup, the scheduler and /proc/meminfo (see
-# pytransrate.memory), or from --max-memory where those are absent or lie.
+# pytransrate.memory), or from --max-memory (spelled --mem too, because that
+# is what a scheduler directive and the pipelines wrapping this call it)
+# where those are absent or lie. The warning names which of them it used:
+# 773.1 GB is worth trusting as a Slurm allocation and worth overriding as a
+# shared node's free memory, and the figure alone says neither.
 #
 # The cap costs less than it looks. Striding's speedup is bounded at ~6x
 # anyway (see STRIDING), so it is reached at ~16 workers and everything above

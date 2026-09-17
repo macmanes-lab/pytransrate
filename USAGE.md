@@ -312,11 +312,14 @@ bytes per process ~= 4 * (n_bases + n_contigs)
 A 5.8 Gbp merged assembly is 23 GB per process, so `-t 40` asks for 928 GB —
 and since mapping and quantifying come first, the OOM killer arrives hours
 into the run. pytransrate now works out what is available (cgroup, Slurm
-allocation, `/proc/meminfo`), caps the processes at what fits, and says so:
+allocation, `/proc/meminfo`), caps the processes at what fits, and says so,
+naming the figure it used and where that figure came from:
 
 ```
-[ WARN] 40 processes would need 927.7 GB of shared accumulators and only
-        500.0 GB looks available; assigning across 16 instead.
+[ WARN] 40 processes would need 927.7 GB of shared accumulators and the Slurm
+        allocation is 773.1 GB; assigning across 25 instead. Pass --max-memory
+        (or --mem) to say otherwise; mapping and quantifying still used every
+        thread.
 ```
 
 snap and salmon still get every thread; only this step is capped. Little is
@@ -418,10 +421,12 @@ usually an aligner run that died partway. Delete it and map again.
 **Killed, exit 137, right after `assigning fragments and computing read
 metrics`** — the OOM killer. The line above it reports what that step asked
 for: `assigning across 40 processes (927.7 GB of shared accumulators)`.
-Current versions cap the processes at what memory allows instead; if the
-figure they detect is wrong for your scheduler, pass `--max-memory`. Rerun
-the same command with the same `-o` — the index, BAM and `quant.sf` are all
-reused.
+Current versions cap the processes at what memory allows instead, and the
+warning they print names both the figure and where it came from. If that
+figure is wrong for your scheduler, pass `--max-memory 670G` (or `--mem 670`,
+the same option). Rerun the same command with the same `-o` — the index, BAM
+and `quant.sf` are all reused, so a retry costs minutes rather than the hours
+the first attempt spent before it died.
 
 **snap dies with SIGFPE** — you have passed the Ruby's multi-alignment
 settings. Use the defaults.
