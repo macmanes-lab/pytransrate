@@ -31,7 +31,7 @@ from pytransrate.bam_metrics import (
     iter_alignments,
 )
 from pytransrate.compression import open_text
-from pytransrate.memory import available_bytes, format_bytes
+from pytransrate.memory import Budget, available_budget, format_bytes
 from pytransrate.segmenter import DEFAULT_NULL_PRIOR
 
 __all__ = ["READ_STATS_KEYS", "ReadMetrics", "get_read_length"]
@@ -198,8 +198,10 @@ def _memory_capped_workers(workers: int, bytes_per_worker: int, budget=None) -> 
     Args:
         workers: what --threads asked for.
         bytes_per_worker: from :func:`_shared_bytes_per_worker`.
-        budget: bytes this run may use, or None to work it out from the
-            cgroup, the scheduler and /proc/meminfo.
+        budget: bytes this run may use -- a plain integer, or a
+            :class:`~pytransrate.memory.Budget` carrying where the figure
+            came from.  None works it out from the cgroup, the scheduler and
+            /proc/meminfo.
 
     Returns:
         At least 1, and never more than ``workers``.  Unchanged when there is
@@ -209,17 +211,26 @@ def _memory_capped_workers(workers: int, bytes_per_worker: int, budget=None) -> 
     if workers < 2 or bytes_per_worker <= 0:
         return workers
     if budget is None:
-        budget = available_bytes()
+        budget = available_budget()
+    elif not isinstance(budget, Budget):
+        budget = Budget(budget, "--max-memory setting")
     if budget is None:
         logger.debug("cannot tell how much memory is available; not capping threads")
         return workers
 
     # The parent holds one buffer's worth more than the workers do, for the
     # private copy it takes out of the merged block before the mmaps go.
-    usable = budget * _MEMORY_HEADROOM - bytes_per_worker
+    usable = budget.bytes * _MEMORY_HEADROOM - bytes_per_worker
     affordable = int(usable // (bytes_per_worker + _WORKER_OVERHEAD_BYTES))
 
     if affordable >= workers:
+        logger.debug(
+            "%d processes need %s, within the %s of %s",
+            workers,
+            format_bytes(workers * bytes_per_worker),
+            budget.source,
+            format_bytes(budget.bytes),
+        )
         return workers
 
     if affordable < 1:
@@ -227,21 +238,23 @@ def _memory_capped_workers(workers: int, bytes_per_worker: int, budget=None) -> 
         # budget here. Say so and run it anyway: the figures above are an
         # estimate, and refusing a run on an estimate is its own failure.
         logger.warning(
-            "this assembly needs about %s for coverage accumulators and only "
-            "%s looks available; assigning in one process, which may still "
-            "run out of memory. Pass --max-memory if that figure is wrong.",
+            "this assembly needs about %s for coverage accumulators and the "
+            "%s is %s; assigning in one process, which may still run out of "
+            "memory. Pass --max-memory if that figure is wrong.",
             format_bytes(bytes_per_worker),
-            format_bytes(budget),
+            budget.source,
+            format_bytes(budget.bytes),
         )
         return 1
 
     logger.warning(
-        "%d processes would need %s of shared accumulators and only %s looks "
-        "available; %s instead. Pass --max-memory to say otherwise; mapping "
+        "%d processes would need %s of shared accumulators and the %s is %s; "
+        "%s instead. Pass --max-memory (or --mem) to say otherwise; mapping "
         "and quantifying still used every thread.",
         workers,
         format_bytes(workers * bytes_per_worker),
-        format_bytes(budget),
+        budget.source,
+        format_bytes(budget.bytes),
         "assigning in one process"
         if affordable == 1
         else f"assigning across {affordable}",

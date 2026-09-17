@@ -20,7 +20,7 @@ from pytransrate.read_metrics import (
     _shared_bytes_per_worker,
 )
 
-GB = 1 << 30
+GB = 10 ** 9
 
 
 # -- parsing --------------------------------------------------------------
@@ -29,18 +29,27 @@ GB = 1 << 30
 @pytest.mark.parametrize(
     "text,expected",
     [
-        ("200", 200 * GB),          # a bare number is GB, as schedulers mean
-        ("200G", 200 * GB),
-        ("200g", 200 * GB),
-        ("200GB", 200 * GB),
-        ("200GiB", 200 * GB),
-        ("512M", 512 * (1 << 20)),
-        ("1.5T", int(1.5 * (1 << 40))),
+        ("670", 670 * GB),          # a bare number is GB, as schedulers mean
+        ("670G", 670 * GB),
+        ("670g", 670 * GB),
+        ("670GB", 670 * GB),
+        ("512M", 512 * 10 ** 6),
+        ("1.5T", int(1.5 * 10 ** 12)),
         ("  64G  ", 64 * GB),
+        # Binary only when it is asked for, so the log reads back the figure
+        # that was typed.
+        ("670Gi", 670 * (1 << 30)),
+        ("670GiB", 670 * (1 << 30)),
+        ("512Mi", 512 * (1 << 20)),
     ],
 )
 def test_parse_size(text, expected):
     assert parse_size(text) == expected
+
+
+def test_a_budget_reads_back_as_the_figure_that_was_typed():
+    """--mem 670 must not turn into "719.4 GB" in the warning it produces."""
+    assert format_bytes(parse_size("670")) == "670.0 GB"
 
 
 @pytest.mark.parametrize("text", ["", "lots", "-5G", "0", "5X", "G"])
@@ -75,9 +84,9 @@ def test_available_bytes_is_none_when_nothing_answers(monkeypatch):
 def test_cgroup_limit_read(tmp_path):
     limit = tmp_path / "memory.max"
     usage = tmp_path / "memory.current"
-    limit.write_text("64424509440\n")   # 60 GB
-    usage.write_text("10737418240\n")   # 10 GB
-    assert memory._cgroup_available(limit, usage) == 50 * GB
+    limit.write_text("64424509440\n")   # 60 GiB, as cgroups count
+    usage.write_text("10737418240\n")   # 10 GiB
+    assert memory._cgroup_available(limit, usage) == 50 * (1 << 30)
 
 
 def test_uncapped_cgroup_is_not_a_limit(tmp_path):
@@ -146,7 +155,9 @@ def test_a_budget_too_small_for_one_worker_falls_back_to_serial(caplog):
 
 def test_an_unknown_budget_does_not_cap(monkeypatch, caplog):
     """A guess that wastes the machine is worse than no guess."""
-    monkeypatch.setattr("pytransrate.read_metrics.available_bytes", lambda: None)
+    monkeypatch.setattr(
+        "pytransrate.read_metrics.available_budget", lambda: None
+    )
     assert _memory_capped_workers(40, 23 * GB) == 40
 
 
@@ -155,7 +166,29 @@ def test_serial_is_left_alone():
 
 
 def test_the_budget_is_consulted_when_none_is_given(monkeypatch):
+    from pytransrate.memory import Budget
+
     monkeypatch.setattr(
-        "pytransrate.read_metrics.available_bytes", lambda: 500 * GB
+        "pytransrate.read_metrics.available_budget",
+        lambda: Budget(500 * GB, "cgroup limit"),
     )
     assert _memory_capped_workers(40, 23 * GB) < 40
+
+
+def test_the_warning_says_where_the_figure_came_from(caplog):
+    """773.1 GB is worth trusting if it is the allocation and worth
+    overriding if it is the node's free memory; the number alone says
+    neither."""
+    from pytransrate.memory import Budget
+
+    with caplog.at_level(logging.WARNING, logger="pytransrate"):
+        _memory_capped_workers(
+            40, 23 * GB, budget=Budget(720 * (1 << 30), "Slurm allocation")
+        )
+    assert "Slurm allocation is 773.1 GB" in caplog.text
+
+
+def test_a_plain_integer_budget_is_the_flag(caplog):
+    with caplog.at_level(logging.WARNING, logger="pytransrate"):
+        _memory_capped_workers(40, 23 * GB, budget=670 * GB)
+    assert "--max-memory setting is 670.0 GB" in caplog.text

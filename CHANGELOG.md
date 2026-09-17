@@ -25,8 +25,14 @@ Python and **does not reproduce their scores** — see *Changed* below.
   ```
 
   The budget is now worked out first — from the cgroup, the Slurm
-  allocation and `/proc/meminfo`, or from the new `--max-memory` — and the
-  processes are capped at what fits, with a warning saying so. snap and
+  allocation and `/proc/meminfo`, or from the new `--max-memory`/`--mem` —
+  and the processes are capped at what fits, with a warning naming both the
+  figure and where it came from:
+
+  ```
+  40 processes would need 927.7 GB of shared accumulators and the Slurm
+  allocation is 773.1 GB; assigning across 25 instead.
+  ``` snap and
   salmon still use every thread. Little speed is lost: dividing this step is
   bounded at about 6x however many processes run (see STRIDING in
   `read_metrics`), which is reached around 16.
@@ -51,10 +57,14 @@ Python and **does not reproduce their scores** — see *Changed* below.
 
 ### Added
 
-- **`--max-memory SIZE`.** What the read-metrics step may use — `200G`,
-  `512M`, or a bare number for GB. Only needed where the detected figure is
-  wrong, which is most likely on a scheduler that enforces a limit the
-  cgroup does not show.
+- **`--max-memory SIZE`, also spelled `--mem SIZE`.** What the read-metrics
+  step may use — `670G`, `512M`, or a bare number for GB (`670Gi` for GiB).
+  Only needed where the detected figure is wrong, which is most likely on a
+  scheduler enforcing a limit the cgroup does not show, or under a pipeline
+  that already knows what it asked for: `--mem` is what those call it, so
+  the figure can be passed straight through. An explicit figure wins over
+  detection, and reads back unchanged in the log, decimal as everything else
+  this program prints is.
 
 - **Gzipped input.** The assembly and the read files may each be gzipped, in
   any combination: `pytransrate -a asm.fa.gz --left r1.fq.gz --right

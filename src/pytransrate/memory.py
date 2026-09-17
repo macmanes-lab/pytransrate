@@ -16,11 +16,18 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections import namedtuple
 from pathlib import Path
 
-__all__ = ["available_bytes", "format_bytes", "parse_size"]
+__all__ = ["Budget", "available_budget", "available_bytes", "format_bytes",
+           "parse_size"]
 
 logger = logging.getLogger("pytransrate")
+
+#: A budget and where it came from.  The source is carried because the figure
+#: alone is not actionable: 773.1 GB is worth overriding if it is the node's
+#: free memory and worth trusting if it is what the job was allocated.
+Budget = namedtuple("Budget", "bytes source")
 
 #: cgroup v2, then v1.  A container or a scheduler-managed job is capped well
 #: below what /proc/meminfo reports, because /proc is the host's.
@@ -34,25 +41,37 @@ _CGROUP_V1 = (
 #: v1 writes 2**63 rounded down to a page, and anything near it is not a cap.
 _NO_LIMIT = 2 ** 62
 
-_SIZE = re.compile(r"^\s*([0-9]*\.?[0-9]+)\s*([kmgtp]?)i?b?\s*$", re.IGNORECASE)
+_SIZE = re.compile(
+    r"^\s*([0-9]*\.?[0-9]+)\s*([kmgtp])?(i)?b?\s*$", re.IGNORECASE
+)
 
-_UNITS = {"": 1 << 30, "k": 1 << 10, "m": 1 << 20, "g": 1 << 30, "t": 1 << 40,
-          "p": 1 << 50}
+#: Decimal by default, binary for an explicit ``i``: 670G is 670 GB and
+#: 670Gi is 670 GiB.  Decimal because every figure this program prints is
+#: bytes/1e9, and a budget that reads back as a different number than the one
+#: that was typed is a budget nobody trusts.  It also errs low, which is the
+#: safe direction for the thing standing between a run and the OOM killer.
+_DECIMAL = {"": 10 ** 9, "k": 10 ** 3, "m": 10 ** 6, "g": 10 ** 9,
+            "t": 10 ** 12, "p": 10 ** 15}
+_BINARY = {"": 1 << 30, "k": 1 << 10, "m": 1 << 20, "g": 1 << 30,
+           "t": 1 << 40, "p": 1 << 50}
 
 
 def parse_size(text) -> int:
-    """Bytes from a human-written size: ``200G``, ``512M``, ``1.5T``, ``200``.
+    """Bytes from a human-written size: ``670G``, ``512M``, ``1.5T``, ``670``.
 
     A bare number is gigabytes, because that is the unit every scheduler
-    directive and every person asking for memory on a cluster uses.
+    directive and every person asking for memory on a cluster uses.  ``670G``
+    is 670 GB and ``670Gi`` is 670 GiB, the 7% between them being the
+    difference between what was typed and what the log would say.
     """
     match = _SIZE.match(str(text))
     if not match:
         raise ValueError(
-            f"cannot read {text!r} as a memory size; try something like 200G"
+            f"cannot read {text!r} as a memory size; try something like 670G"
         )
-    value, unit = match.groups()
-    size = int(float(value) * _UNITS[unit.lower()])
+    value, unit, binary = match.groups()
+    units = _BINARY if binary else _DECIMAL
+    size = int(float(value) * units[(unit or "").lower()])
     if size <= 0:
         raise ValueError(f"memory size must be positive, got {text!r}")
     return size
@@ -131,31 +150,39 @@ def _slurm_allocation():
     return None
 
 
-def available_bytes():
+def available_budget():
     """Memory this process may reasonably expect to get, or None.
 
     The smallest of every limit that can be found, because they are all real
     -- a cgroup does not care that the node has more, and the node does not
-    care that the cgroup allows more.
+    care that the cgroup allows more.  A Slurm allocation is in that list
+    because a site that does not constrain RAM in the cgroup still kills the
+    job against it, while /proc reports the whole node.
     """
     found = {
-        "cgroup v2": _cgroup_available(*_CGROUP_V2),
-        "cgroup v1": _cgroup_available(*_CGROUP_V1),
-        "slurm": _slurm_allocation(),
-        "meminfo": _meminfo_available(),
+        "cgroup limit": _cgroup_available(*_CGROUP_V2),
+        "cgroup v1 limit": _cgroup_available(*_CGROUP_V1),
+        "Slurm allocation": _slurm_allocation(),
+        "available memory (MemAvailable)": _meminfo_available(),
     }
     known = {name: size for name, size in found.items() if size}
     if not known:
         fallback = _sysconf_available()
         if not fallback:
             return None
-        known["sysconf"] = fallback
+        known["free physical memory"] = fallback
 
-    name = min(known, key=lambda key: known[key])
+    source = min(known, key=lambda key: known[key])
     logger.debug(
         "memory available: %s (%s); saw %s",
-        format_bytes(known[name]),
-        name,
+        format_bytes(known[source]),
+        source,
         ", ".join(f"{k}={format_bytes(v)}" for k, v in known.items()),
     )
-    return known[name]
+    return Budget(known[source], source)
+
+
+def available_bytes():
+    """:func:`available_budget` without its provenance, or None."""
+    budget = available_budget()
+    return budget.bytes if budget else None

@@ -1363,11 +1363,19 @@ def test_cli_parses_max_memory():
     parser = build_parser()
     assert parser.parse_args(["-a", "x.fa"]).max_memory is None
     assert parser.parse_args(
-        ["-a", "x.fa", "--max-memory", "200G"]
-    ).max_memory == 200 * (1 << 30)
+        ["-a", "x.fa", "--max-memory", "670G"]
+    ).max_memory == 670 * 10 ** 9
     assert parser.parse_args(
-        ["-a", "x.fa", "--max-memory", "200"]
-    ).max_memory == 200 * (1 << 30)
+        ["-a", "x.fa", "--max-memory", "670"]
+    ).max_memory == 670 * 10 ** 9
+
+
+def test_cli_takes_mem_as_well_as_max_memory():
+    """Pipelines wrapping this one pass their own --mem straight through."""
+    from pytransrate.cli import build_parser
+
+    args = build_parser().parse_args(["-a", "x.fa", "--mem", "670"])
+    assert args.max_memory == 670 * 10 ** 9
 
 
 def test_cli_rejects_a_nonsense_max_memory(capsys):
@@ -1375,4 +1383,4 @@ def test_cli_rejects_a_nonsense_max_memory(capsys):
 
     with pytest.raises(SystemExit):
         build_parser().parse_args(["-a", "x.fa", "--max-memory", "plenty"])
-    assert "200G" in capsys.readouterr().err
+    assert "670G" in capsys.readouterr().err

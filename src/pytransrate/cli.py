@@ -168,16 +168,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="threads to use (default: 8)",
     )
     general.add_argument(
-        "--max-memory",
+        # --mem because that is what a scheduler directive and the pipelines
+        # wrapping this call it; a job that already knows it asked for 670 GB
+        # should be able to pass that figure straight through.
+        "--max-memory", "--mem",
         type=_memory_size,
         default=None,
         metavar="SIZE",
-        help="memory the read-metrics step may use, e.g. 200G (a bare number "
-             "is GB). Caps the processes it forks, since each one holds a "
-             "full-size copy of the per-base coverage accumulators. The "
-             "default reads the cgroup, the Slurm allocation and "
-             "/proc/meminfo, which is right unless your scheduler enforces a "
-             "limit none of those show",
+        help="memory the read-metrics step may use, e.g. 670G (a bare number "
+             "is GB, so --mem 670 is 670 GB). Caps the processes it forks, "
+             "since each one holds a full-size copy of the per-base coverage "
+             "accumulators. The default reads the cgroup, the Slurm "
+             "allocation and /proc/meminfo, which is right unless your "
+             "scheduler or pipeline enforces a limit none of those show",
     )
     general.add_argument(
         "--loglevel",

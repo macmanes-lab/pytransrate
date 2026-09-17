@@ -204,7 +204,7 @@ Give both or neither.
 | --- | --- | --- |
 | `-o`, `--output DIR` | `transrate_results` | output directory |
 | `-t`, `--threads N` | 8 | threads for snap and salmon, and processes for the read-metrics step |
-| `--max-memory SIZE` | detected | memory the read-metrics step may use — `200G`, `512M`, or a bare number for GB. It caps the processes that step forks, since each holds a full-size copy of the coverage accumulators. The default reads the cgroup, the Slurm allocation and `/proc/meminfo` |
+| `--max-memory SIZE`, `--mem SIZE` | detected | memory the read-metrics step may use — `670G`, `512M`, or a bare number for GB (`670Gi` for GiB). It caps the processes that step forks, since each holds a full-size copy of the coverage accumulators. The default reads the cgroup, the Slurm allocation and `/proc/meminfo`, so the flag is only needed when that figure is wrong |
 | `--loglevel LEVEL` | `info` | `error`, `warn`, `info`, `debug`; `debug` logs every external command before it runs |
 | `--keep-bam` | off | keep the alignment BAM instead of deleting it on success. It is large — many gigabytes on a real library |
 | `--no-banner` | off | suppress the startup banner |
@@ -321,9 +321,27 @@ allocation, `/proc/meminfo`), caps the processes at what fits, and says so:
 
 snap and salmon still get every thread; only this step is capped. Little is
 lost — dividing this step is bounded at about 6x however many processes run,
-so it is at its plateau by ~16. Pass `--max-memory 200G` where the detected
-figure is wrong, which is most likely on a scheduler that enforces a limit
-the cgroup does not show.
+so it is at its plateau by ~16.
+
+Two ways to set the budget, and both matter:
+
+- **On its own**, pytransrate detects it: cgroup limit, then the Slurm
+  allocation (`SLURM_MEM_PER_NODE`, or `SLURM_MEM_PER_CPU` × CPUs), then
+  `MemAvailable`. It takes the smallest, since every one of them is real, and
+  names the one it used — `#SBATCH --mem 720G` reads back as `the Slurm
+  allocation is 773.1 GB`, which is the same figure counted in GB rather than
+  GiB. Where that name is `available memory (MemAvailable)` on a shared node,
+  the figure is whatever the node had free at that moment and is worth
+  overriding.
+- **From a pipeline that already knows the figure**, pass it through:
+  `--max-memory 670G`, or `--mem 670` for the same thing, since that is what
+  the wrapper and the scheduler directive call it. An explicit figure wins
+  over detection — which is the point, because the case that needs it is a
+  scheduler enforcing a limit the cgroup does not show.
+
+Sizes are decimal unless you ask otherwise: `670G` is 670 GB, `670Gi` is 670
+GiB, and a bare `670` is 670 GB. The figure you pass is the figure the log
+reports back.
 
 **Resuming a killed run.** A run that dies after mapping does not repeat it.
 Rerunning the same command with the same `-o` reuses, in order:
