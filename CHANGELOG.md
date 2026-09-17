@@ -8,26 +8,16 @@ Versions up to and including 1.0.3 are the original Ruby
 [transrate](https://github.com/blahah/transrate). 2.0.0 is a rewrite in
 Python and **does not reproduce their scores** — see *Changed* below.
 
-## [Unreleased]
+## [2.2.1] — 2026-09-17
 
-### Fixed
-
-- **A failed run no longer throws away the BAM that took hours to make.**
-  The BAM was deleted at the end of each assembly's analysis, before the run
-  had written `assemblies.csv` — so a run that died anywhere after that point,
-  or on a later assembly, had already destroyed the work a rerun needed. It is
-  now deleted once the whole run has succeeded, and a run that fails keeps
-  every BAM it made. `--keep-bam` is unchanged.
-
-- **A partial BAM from a killed run is moved aside, not overwritten.** Mapping
-  again used to write straight over it. It cannot be used for metrics — half a
-  library gives half the coverage — but it is the only evidence of what the
-  aligner did before it died, which is exactly what is wanted when the crash is
-  [amplab/snap#171][snap171]. It is renamed to `<bam>.partial` instead, with
-  the path and a removal command logged. At most one is kept, so the cost is
-  bounded at one extra file rather than growing with every retry.
+A follow-up to 2.2.0, about not destroying the expensive intermediates when a
+run fails. The BAM was deleted at the end of each assembly's analysis rather
+than at the end of the run, so anything that went wrong afterwards had already
+thrown away the hours that produced it. **Scores are unchanged** — nothing
+here touches what is computed, only which files survive.
 
 ### Added
+
 
 - **Tests for all of it**, in `tests/test_recovery.py`: a failed run keeps its
   BAM, a partial BAM is moved rather than overwritten and kept byte for byte,
@@ -54,6 +44,24 @@ Python and **does not reproduce their scores** — see *Changed* below.
   check still runs — the marker says the run finished, the marker and the EOF
   together say the file did too. A BAM predating this is reused on the EOF
   alone and has a marker written for it.
+
+### Fixed
+
+
+- **A failed run no longer throws away the BAM that took hours to make.**
+  The BAM was deleted at the end of each assembly's analysis, before the run
+  had written `assemblies.csv` — so a run that died anywhere after that point,
+  or on a later assembly, had already destroyed the work a rerun needed. It is
+  now deleted once the whole run has succeeded, and a run that fails keeps
+  every BAM it made. `--keep-bam` is unchanged.
+
+- **A partial BAM from a killed run is moved aside, not overwritten.** Mapping
+  again used to write straight over it. It cannot be used for metrics — half a
+  library gives half the coverage — but it is the only evidence of what the
+  aligner did before it died, which is exactly what is wanted when the crash is
+  [amplab/snap#171][snap171]. It is renamed to `<bam>.partial` instead, with
+  the path and a removal command logged. At most one is kept, so the cost is
+  bounded at one extra file rather than growing with every retry.
 
 ## [2.2.0] — 2026-09-17
 
@@ -580,6 +588,7 @@ end to end, with byte-identical scores:
   and raises, so a script using it gets an error rather than silently
   different output.
 
+[2.2.1]: https://github.com/macmanes-lab/pytransrate/releases/tag/v2.2.1
 [2.2.0]: https://github.com/macmanes-lab/pytransrate/releases/tag/v2.2.0
 [2.1.0]: https://github.com/macmanes-lab/pytransrate/releases/tag/v2.1.0
 [2.0.0]: https://github.com/macmanes-lab/pytransrate/releases/tag/v2.0.0
