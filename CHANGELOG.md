@@ -29,6 +29,13 @@ Python and **does not reproduce their scores** — see *Changed* below.
 
 ### Added
 
+- **Tests for all of it**, in `tests/test_recovery.py`: a failed run keeps its
+  BAM, a partial BAM is moved rather than overwritten and kept byte for byte,
+  only one partial is ever kept, the marker is written only once every
+  post-run check has passed, and a BAM predating the marker is still reused.
+  Checked against the code as it was before the fix, where nine of the
+  thirteen fail.
+
 - **A failed run now lists what it kept.** As pytransrate gives up it names
   every BAM and `quant.sf` still under the output directory, with sizes, and
   marks each BAM complete or partial. It turns "do I have to map again?" into
