@@ -31,6 +31,7 @@ from pytransrate.bam_metrics import (
     iter_alignments,
 )
 from pytransrate.compression import open_text
+from pytransrate.memory import available_bytes, format_bytes
 from pytransrate.segmenter import DEFAULT_NULL_PRIOR
 
 __all__ = ["READ_STATS_KEYS", "ReadMetrics", "get_read_length"]
@@ -107,6 +108,37 @@ _READ_LENGTH_SAMPLE = 5000
 # integer sum with nothing to say about ordering.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# MEMORY_BUDGET
+#
+# Every worker gets its own full-size copy of the accumulators -- that is the
+# price of writing into them without a lock -- so the memory this step needs
+# is `--threads` times the assembly, not the assembly. The coverage buffer
+# dominates: int32 per base, so 4 bytes x (total assembly length + one per
+# contig), which on a merged multi-assembly of 5.8 Gbp is 23 GB. Per worker.
+# At `-t 40` that is 928 GB, and the OOM killer takes the run out after
+# mapping and quantifying have already run for nine hours.
+#
+# Nothing about the request is unreasonable -- 40 cores were free -- so the
+# fix is not to refuse it but to spend it on what fits: the workers are
+# capped at what the memory budget allows, and the run says so and carries
+# on. The budget comes from the cgroup, the scheduler and /proc/meminfo (see
+# pytransrate.memory), or from --max-memory where those are absent or lie.
+#
+# The cap costs less than it looks. Striding's speedup is bounded at ~6x
+# anyway (see STRIDING), so it is reached at ~16 workers and everything above
+# that was buying decimals for gigabytes.
+# ---------------------------------------------------------------------------
+
+#: Share of the memory budget the accumulators may take. The rest is the
+#: assembly the parent is holding, the expression table, pysam's own buffers,
+#: and the margin between an estimate and an OOM kill.
+_MEMORY_HEADROOM = 0.8
+
+#: Per worker, on top of its accumulators: interpreter, pysam, the BAM
+#: decompression buffers, and the copy-on-write pages the fork dirties.
+_WORKER_OVERHEAD_BYTES = 300_000_000
+
 #: Per-contig accumulators the workers merge, in the order the shared buffer
 #: carries them.  Every one is an integer sum, which is what makes the merge
 #: a single addition with no rounding to reason about.  See PARALLEL_SUM.
@@ -153,6 +185,68 @@ def _worker_count(threads: int) -> int:
         logger.info("no fork available; assigning in one process")
         return 1
     return int(threads)
+
+
+def _shared_bytes_per_worker(lengths, n_contigs: int) -> int:
+    """Bytes of shared accumulator one worker needs for this assembly."""
+    return counts_buffer_size(lengths) * 4 + len(_MERGED_FIELDS) * n_contigs * 8
+
+
+def _memory_capped_workers(workers: int, bytes_per_worker: int, budget=None) -> int:
+    """``workers``, lowered to what the memory budget affords. See MEMORY_BUDGET.
+
+    Args:
+        workers: what --threads asked for.
+        bytes_per_worker: from :func:`_shared_bytes_per_worker`.
+        budget: bytes this run may use, or None to work it out from the
+            cgroup, the scheduler and /proc/meminfo.
+
+    Returns:
+        At least 1, and never more than ``workers``.  Unchanged when there is
+        no way to tell what is available: a guess that stops a run from using
+        the machine it was given is worse than no guess at all.
+    """
+    if workers < 2 or bytes_per_worker <= 0:
+        return workers
+    if budget is None:
+        budget = available_bytes()
+    if budget is None:
+        logger.debug("cannot tell how much memory is available; not capping threads")
+        return workers
+
+    # The parent holds one buffer's worth more than the workers do, for the
+    # private copy it takes out of the merged block before the mmaps go.
+    usable = budget * _MEMORY_HEADROOM - bytes_per_worker
+    affordable = int(usable // (bytes_per_worker + _WORKER_OVERHEAD_BYTES))
+
+    if affordable >= workers:
+        return workers
+
+    if affordable < 1:
+        # Serial needs about one buffer's worth, which is also more than the
+        # budget here. Say so and run it anyway: the figures above are an
+        # estimate, and refusing a run on an estimate is its own failure.
+        logger.warning(
+            "this assembly needs about %s for coverage accumulators and only "
+            "%s looks available; assigning in one process, which may still "
+            "run out of memory. Pass --max-memory if that figure is wrong.",
+            format_bytes(bytes_per_worker),
+            format_bytes(budget),
+        )
+        return 1
+
+    logger.warning(
+        "%d processes would need %s of shared accumulators and only %s looks "
+        "available; %s instead. Pass --max-memory to say otherwise; mapping "
+        "and quantifying still used every thread.",
+        workers,
+        format_bytes(workers * bytes_per_worker),
+        format_bytes(budget),
+        "assigning in one process"
+        if affordable == 1
+        else f"assigning across {affordable}",
+    )
+    return affordable
 
 
 def _accumulate_stripe(worker_id: int) -> None:
@@ -304,6 +398,15 @@ def _accumulate_parallel(
     for block in scalar_blocks[1:]:
         merged_scalars += np.frombuffer(block, dtype=np.int64).reshape(shape)
     merged_scalars = merged_scalars.copy()
+
+    # Everything is in the first block of each kind now, and the rest are
+    # dead weight -- (workers - 1) times the assembly of it. Freed here
+    # rather than at the end of the function, so the private copy taken
+    # below is made while two buffers are mapped instead of workers plus one.
+    # See MEMORY_BUDGET. close() is idempotent, so the tidy-up below still
+    # covers the paths that do not reach this far.
+    for block in counts_blocks[1:] + scalar_blocks[1:]:
+        block.close()
 
     # Finalise off the shared merged buffer, before it is copied out of the
     # mmap: contigs are independent once their coverage is complete, so this
@@ -482,6 +585,7 @@ class ReadMetrics:
         read_length: int | None = None,
         nullprior: float = DEFAULT_NULL_PRIOR,
         threads: int = 1,
+        max_memory: int | None = None,
     ) -> "ReadMetrics":
         """Assign fragments, accumulate per-contig metrics, and aggregate.
 
@@ -495,6 +599,9 @@ class ReadMetrics:
             threads: processes to divide the fragments across.  See STRIDING
                 for what this does and does not buy; 1 keeps everything in
                 this process.
+            max_memory: bytes the accumulators may take, which caps the
+                processes actually used.  None works it out from the cgroup,
+                the scheduler and /proc/meminfo.  See MEMORY_BUDGET.
         """
         self.fragments = fragments
         if read_length:
@@ -508,6 +615,15 @@ class ReadMetrics:
         with pysam.AlignmentFile(str(bam_path), "rb") as bam:
             references = list(bam.references)
             lengths = list(bam.lengths)
+
+        # Before anything is allocated: the accumulators are sized by the
+        # assembly and multiplied by the worker count, and this is the step
+        # that gets a long run killed. See MEMORY_BUDGET.
+        workers = _memory_capped_workers(
+            workers,
+            _shared_bytes_per_worker(lengths, len(references)),
+            budget=max_memory,
+        )
 
         if workers > 1:
             contig_metrics = _accumulate_parallel(

@@ -20,11 +20,20 @@ TPM, NumReads -- so the parser below matches the Ruby's.
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
+
+import pysam
 
 from pytransrate.cmd import CommandError, run, which
 
-__all__ = ["SalmonError", "Salmon", "Expression", "load_expression"]
+__all__ = [
+    "SalmonError",
+    "Salmon",
+    "Expression",
+    "load_expression",
+    "quant_is_complete",
+]
 
 logger = logging.getLogger("pytransrate")
 
@@ -35,6 +44,79 @@ class SalmonError(CommandError):
 
 #: quant.sf column count, as the Ruby also asserted.
 _QUANT_COLUMNS = 5
+
+#: Bytes read from the end of a quant.sf to see whether it was finished.
+_QUANT_TAIL_BYTES = 8192
+
+
+def _reference_count(bam) -> int | None:
+    """References in a BAM header, which is one row per contig in quant.sf."""
+    try:
+        with pysam.AlignmentFile(str(bam), "rb") as handle:
+            return handle.nreferences
+    except Exception:  # an unreadable BAM is the mapping step's to report
+        return None
+
+
+def _row_count(path) -> int:
+    """Data rows in a quant.sf, not counting its header."""
+    with open(path, "rb") as handle:
+        return max(sum(1 for _ in handle) - 1, 0)
+
+
+def quant_is_complete(path, expected_rows: int | None = None) -> bool:
+    """Whether a ``quant.sf`` was written all the way to the end.
+
+    Reuse is what makes a killed run cheap to restart, and quantifying a real
+    library is hours of it -- but salmon killed partway leaves a file that
+    parses perfectly and is simply missing contigs, and every read metric
+    downstream would be computed against it without a word.  A complete
+    quant.sf ends in a newline after a full row, so a file that does not is
+    one to quantify again.
+
+    Version-agnostic on purpose: it asks the file, not salmon's auxiliary
+    directories, which have moved between releases.
+
+    Args:
+        path: the quant.sf to judge.
+        expected_rows: contigs the file should carry one row each for, when
+            the caller knows.  The newline check below catches a file cut
+            mid-row, which is the likely way a kill lands, but not one cut
+            cleanly at a row boundary; a row count catches both.  ``None``
+            skips it rather than guessing.
+    """
+    try:
+        size = os.path.getsize(path)
+        if size == 0:
+            return False
+        with open(path, "rb") as handle:
+            handle.seek(max(size - _QUANT_TAIL_BYTES, 0))
+            tail = handle.read()
+    except OSError:
+        return False
+
+    if not tail.endswith(b"\n"):
+        return False
+    lines = tail.splitlines()
+    # A header and nothing else is a salmon that died before writing a row;
+    # it parses, and gives every contig no expression at all.
+    if size <= _QUANT_TAIL_BYTES and len(lines) < 2:
+        return False
+    if len(lines[-1].split(b"\t")) != _QUANT_COLUMNS:
+        return False
+
+    if expected_rows is not None:
+        try:
+            rows = _row_count(path)
+        except OSError:
+            return False
+        if rows != expected_rows:
+            logger.warning(
+                "%s holds %d contigs, not the %d in the alignments",
+                path, rows, expected_rows,
+            )
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -156,8 +238,16 @@ class Salmon:
         quant_sf = output_dir / "quant.sf"
 
         if quant_sf.exists():
-            logger.info("reusing existing salmon output: %s", quant_sf)
-            return load_expression(quant_sf)
+            if quant_is_complete(quant_sf, _reference_count(bam)):
+                logger.info("reusing existing salmon output: %s", quant_sf)
+                return load_expression(quant_sf)
+            logger.warning(
+                "%s ends mid-row, so salmon did not finish writing it -- a "
+                "killed run leaves exactly this. Quantifying again.",
+                quant_sf,
+            )
+        else:
+            logger.info("no quant.sf in %s; quantifying", output_dir)
 
         args = self.build_command(
             assembly, bam, threads=threads, output_dir=output_dir, **kwargs

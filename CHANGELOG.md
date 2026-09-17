@@ -10,7 +10,51 @@ Python and **does not reproduce their scores** — see *Changed* below.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The read-metrics step no longer asks for more memory than the machine
+  has.** It divides the fragments across `--threads` processes, and each one
+  holds its own full-size copy of the per-base coverage accumulators — 4
+  bytes a base. On a 5.8 Gbp merged assembly that is 23 GB per process, so
+  `-t 40` asked for 928 GB and the OOM killer ended the run *after* nine
+  hours of mapping and quantifying:
+
+  ```
+  assigning across 40 processes (927.7 GB of shared accumulators)
+  Killed
+  ```
+
+  The budget is now worked out first — from the cgroup, the Slurm
+  allocation and `/proc/meminfo`, or from the new `--max-memory` — and the
+  processes are capped at what fits, with a warning saying so. snap and
+  salmon still use every thread. Little speed is lost: dividing this step is
+  bounded at about 6x however many processes run (see STRIDING in
+  `read_metrics`), which is reached around 16.
+
+  The parent also frees each worker's buffer as soon as it has been summed
+  rather than at the end of the step, so its own copy is taken while two
+  buffers are held instead of `--threads` plus one.
+
+- **A killed run no longer half-reuses what it left behind.** Resuming
+  already reused the snap index, the BAM and `salmon/quant.sf`, which is
+  what makes a retry cheap — but a process killed mid-write leaves a BAM
+  with no BGZF end-of-file marker and a `quant.sf` missing contigs, and both
+  were reused without a word, giving metrics computed against a fraction of
+  the library. Both are now checked before they are trusted: the BAM for its
+  end-of-file marker, `quant.sf` for a complete final row and one row per
+  contig in the BAM. Anything short is redone.
+
+  Every reuse decision is also logged now, the way the index build has been
+  since it was worth knowing which of them a run skipped. Reusing the BAM
+  silently was the difference between a five-hour step and no step at all,
+  with nothing in the log either way.
+
 ### Added
+
+- **`--max-memory SIZE`.** What the read-metrics step may use — `200G`,
+  `512M`, or a bare number for GB. Only needed where the detected figure is
+  wrong, which is most likely on a scheduler that enforces a limit the
+  cgroup does not show.
 
 - **Gzipped input.** The assembly and the read files may each be gzipped, in
   any combination: `pytransrate -a asm.fa.gz --left r1.fq.gz --right

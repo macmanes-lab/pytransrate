@@ -320,3 +320,78 @@ def test_skipped_records_are_counted_once(tmp_path):
 @pytest.mark.parametrize("threads,expected", [(None, 1), (0, 1), (1, 1), (2, 2), (16, 16)])
 def test_worker_count(threads, expected):
     assert _worker_count(threads) == expected
+
+
+# ---------------------------------------------------------------------------
+# A memory budget changes how many processes run, not the answer
+# ---------------------------------------------------------------------------
+
+
+def _quantified():
+    """``_expression`` with the fields ReadMetrics itself reads, as salmon
+    writes them -- the assignment step only ever looks at eff_count."""
+    return {
+        name: {"eff_count": 10.0 + index, "eff_len": length - 50, "tpm": 1.0}
+        for index, (name, length) in enumerate(REFS)
+    }
+
+
+def _assembly(tmp_path):
+    """The contigs REFS names, as a FASTA ReadMetrics can fold metrics into."""
+    from pytransrate.assembly import Assembly
+
+    path = tmp_path / "assembly.fa"
+    path.write_text(
+        "".join(f">{name}\n{'A' * length}\n" for name, length in REFS)
+    )
+    return Assembly(str(path))
+
+
+def _read_metrics(bam_path, threads, max_memory=None, assembly=None):
+    """A full ReadMetrics.run, which is where the budget is applied."""
+    from pytransrate.read_metrics import ReadMetrics
+
+    metrics = ReadMetrics(assembly=assembly)
+    metrics.run(
+        bam_path,
+        _quantified(),
+        fragments=60,
+        read_length=100,
+        nullprior=0.7,
+        threads=threads,
+        max_memory=max_memory,
+    )
+    return metrics
+
+
+def test_a_budget_too_small_to_fork_still_gives_the_same_answer(tmp_path):
+    """Capping to one process must fall back, not fail and not drift."""
+    bam_path = _library(tmp_path)
+    want = _read_metrics(bam_path, threads=4, assembly=_assembly(tmp_path))
+    got = _read_metrics(
+        bam_path, threads=4, max_memory=1, assembly=_assembly(tmp_path)
+    )
+
+    for key in ("fragments_mapped", "good_mappings", "bases_uncovered",
+                "bad_mappings", "potential_bridges"):
+        assert got.read_stats()[key] == want.read_stats()[key], key
+
+
+def test_a_generous_budget_leaves_the_worker_count_alone(tmp_path, monkeypatch):
+    seen = []
+    import pytransrate.read_metrics as read_metrics
+
+    original = read_metrics._accumulate_parallel
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs["workers"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(read_metrics, "_accumulate_parallel", spy)
+    _read_metrics(
+        _library(tmp_path),
+        threads=4,
+        max_memory=64 << 30,
+        assembly=_assembly(tmp_path),
+    )
+    assert seen == [4]

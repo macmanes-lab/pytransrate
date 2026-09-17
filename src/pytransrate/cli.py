@@ -32,6 +32,7 @@ from pytransrate.banner import TAGLINE, print_banner
 from pytransrate.cmd import CommandError
 from pytransrate.compression import plain_path, strip_gzip_suffix
 from pytransrate.mapper import Snap
+from pytransrate.memory import parse_size
 from pytransrate.output import (
     READ_STATS_KEYS,
     write_assemblies_csv,
@@ -106,6 +107,14 @@ class _HelpFormatter(argparse.RawDescriptionHelpFormatter):
         super().__init__(prog, max_help_position=32)
 
 
+def _memory_size(text: str) -> int:
+    """``--max-memory`` as bytes, with argparse's own error on nonsense."""
+    try:
+        return parse_size(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pytransrate",
@@ -157,6 +166,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=8,
         metavar="N",
         help="threads to use (default: 8)",
+    )
+    general.add_argument(
+        "--max-memory",
+        type=_memory_size,
+        default=None,
+        metavar="SIZE",
+        help="memory the read-metrics step may use, e.g. 200G (a bare number "
+             "is GB). Caps the processes it forks, since each one holds a "
+             "full-size copy of the per-base coverage accumulators. The "
+             "default reads the cgroup, the Slurm allocation and "
+             "/proc/meminfo, which is right unless your scheduler enforces a "
+             "limit none of those show",
     )
     general.add_argument(
         "--loglevel",
@@ -467,6 +488,7 @@ def analyse_assembly(assembly_path, args, result_dir: Path) -> dict:
         fragments=snap.read_count,
         read_length=get_read_length(left),
         threads=args.threads,
+        max_memory=args.max_memory,
     )
     result.update(read_metrics.read_stats())
     log_metrics("mapping metrics", result, READ_STATS_KEYS)

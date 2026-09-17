@@ -1175,3 +1175,204 @@ def test_a_plain_failure_still_reads_as_an_exit_code(tmp_path, monkeypatch):
 
     with pytest.raises(Exception, match="exit 1"):
         snap.map_reads("l.fq", "r.fq")
+
+
+# ---------------------------------------------------------------------------
+# resuming a killed run
+#
+# Mapping a real library is hours and quantifying it is hours more, so a run
+# that dies in the step after them must not repeat them -- and must not reuse
+# what a kill left half-written either.  Both halves are tested here.
+# ---------------------------------------------------------------------------
+
+
+def _bam_path(tmp_path, left="l.fq", right="r.fq"):
+    return tmp_path / f"{left}.{right}.assembly.bam"
+
+
+def _complete_bam(path, body=b"x" * 100):
+    """A file that ends the way htslib ends a BAM."""
+    from pytransrate.mapper import _BGZF_EOF
+
+    path.write_bytes(body + _BGZF_EOF)
+    return path
+
+
+def test_the_eof_marker_is_the_one_htslib_writes(tmp_path):
+    """Written by hand, so it is worth checking against a real BAM."""
+    import pysam
+
+    from pytransrate.mapper import _BGZF_EOF, bam_is_complete
+
+    path = tmp_path / "real.bam"
+    header = {"HD": {"VN": "1.0"}, "SQ": [{"SN": "c1", "LN": 100}]}
+    with pysam.AlignmentFile(str(path), "wb", header=header):
+        pass
+    assert path.read_bytes().endswith(_BGZF_EOF)
+    assert bam_is_complete(path)
+
+
+def test_truncated_bam_is_not_complete(tmp_path):
+    from pytransrate.mapper import bam_is_complete
+
+    whole = _complete_bam(tmp_path / "a.bam")
+    cut = tmp_path / "b.bam"
+    cut.write_bytes(whole.read_bytes()[:-1])
+    assert not bam_is_complete(cut)
+    assert not bam_is_complete(tmp_path / "gone.bam")
+
+
+def test_a_complete_bam_is_reused_without_remapping(tmp_path, monkeypatch, caplog):
+    """The point of the whole exercise: no snap, and the log says why."""
+    import logging
+
+    calls = []
+    snap = _mapping_snap(tmp_path, monkeypatch, _Result(True))
+    import pytransrate.mapper as mapper
+
+    monkeypatch.setattr(mapper, "run", lambda *a, **k: calls.append(a))
+    _complete_bam(_bam_path(tmp_path))
+    (tmp_path / "l.fq-r.fq-read_count.txt").write_text("480093281\n")
+
+    with caplog.at_level(logging.INFO, logger="pytransrate"):
+        bam = snap.map_reads("l.fq", "r.fq")
+
+    assert calls == []
+    assert bam == str(_bam_path(tmp_path))
+    assert snap.read_count == 480093281
+    assert "reusing existing BAM" in caplog.text
+
+
+def test_a_truncated_bam_is_mapped_again(tmp_path, monkeypatch, caplog):
+    """A BAM from a killed snap parses far enough to give wrong metrics."""
+    import logging
+
+    path = _bam_path(tmp_path)
+    _complete_bam(path)
+    path.write_bytes(path.read_bytes()[:-4])
+
+    snap = _mapping_snap(tmp_path, monkeypatch, _Result(True))
+    with caplog.at_level(logging.INFO, logger="pytransrate"):
+        snap.map_reads("l.fq", "r.fq")
+
+    assert "did not finish" in caplog.text
+    assert path.read_bytes() == b"x" * 10      # snap wrote it again
+
+
+def test_a_missing_bam_says_so_before_the_hours_start(tmp_path, monkeypatch, caplog):
+    import logging
+
+    snap = _mapping_snap(tmp_path, monkeypatch, _Result(True))
+    with caplog.at_level(logging.INFO, logger="pytransrate"):
+        snap.map_reads("l.fq", "r.fq")
+    assert "no BAM at" in caplog.text
+
+
+def test_recovering_the_read_count_the_slow_way_is_logged(tmp_path, monkeypatch, caplog):
+    """Counting a library's lines is itself hours; it may not be silent."""
+    import logging
+
+    reads = tmp_path / "l.fq"
+    reads.write_text("@r\nACGT\n+\nIIII\n" * 3)
+    _complete_bam(tmp_path / f"l.fq.r.fq.assembly.bam")
+    snap = _mapping_snap(tmp_path, monkeypatch, _Result(True))
+
+    with caplog.at_level(logging.INFO, logger="pytransrate"):
+        snap.map_reads(str(reads), "r.fq")
+
+    assert "counting the reads" in caplog.text
+
+
+# -- salmon ---------------------------------------------------------------
+
+
+_QUANT_HEADER = "Name\tLength\tEffectiveLength\tTPM\tNumReads\n"
+
+
+def _quant_table(path, rows):
+    path.write_text(
+        _QUANT_HEADER
+        + "".join(f"c{i}\t100\t80.0\t1.0\t5.0\n" for i in range(rows))
+    )
+    return path
+
+
+def test_complete_quant_is_reused(tmp_path):
+    from pytransrate.quantify import quant_is_complete
+
+    assert quant_is_complete(_quant_table(tmp_path / "quant.sf", 3))
+    assert quant_is_complete(_quant_table(tmp_path / "quant.sf", 3), expected_rows=3)
+
+
+def test_quant_cut_mid_row_is_not_complete(tmp_path):
+    from pytransrate.quantify import quant_is_complete
+
+    path = _quant_table(tmp_path / "quant.sf", 3)
+    path.write_text(path.read_text()[:-8])
+    assert not quant_is_complete(path)
+
+
+def test_quant_cut_at_a_row_boundary_is_caught_by_the_count(tmp_path):
+    """The newline check cannot see this one; the contig count can."""
+    from pytransrate.quantify import quant_is_complete
+
+    path = _quant_table(tmp_path / "quant.sf", 3)
+    assert quant_is_complete(path)                       # looks fine
+    assert not quant_is_complete(path, expected_rows=9)  # is not
+
+
+def test_header_only_quant_is_not_complete(tmp_path):
+    from pytransrate.quantify import quant_is_complete
+
+    path = tmp_path / "quant.sf"
+    path.write_text(_QUANT_HEADER)
+    assert not quant_is_complete(path)
+    path.write_text("")
+    assert not quant_is_complete(path)
+
+
+def test_salmon_requantifies_a_truncated_quant_table(tmp_path, monkeypatch, caplog):
+    import logging
+
+    import pytransrate.quantify as quantify
+
+    out = tmp_path / "salmon"
+    out.mkdir()
+    path = _quant_table(out / "quant.sf", 3)
+    path.write_text(path.read_text()[:-8])
+
+    def fake(args, **kwargs):
+        _quant_table(out / "quant.sf", 3)
+        return _Result(True)
+
+    monkeypatch.setattr(quantify, "run", fake)
+    monkeypatch.setattr(quantify, "_reference_count", lambda bam: None)
+    salmon = Salmon.__new__(Salmon)
+    salmon.binary = "salmon"
+
+    with caplog.at_level(logging.INFO, logger="pytransrate"):
+        expression = salmon.run("a.fa", "a.bam", output_dir=str(out))
+
+    assert "did not finish writing it" in caplog.text
+    assert len(expression) == 3
+
+
+def test_cli_parses_max_memory():
+    from pytransrate.cli import build_parser
+
+    parser = build_parser()
+    assert parser.parse_args(["-a", "x.fa"]).max_memory is None
+    assert parser.parse_args(
+        ["-a", "x.fa", "--max-memory", "200G"]
+    ).max_memory == 200 * (1 << 30)
+    assert parser.parse_args(
+        ["-a", "x.fa", "--max-memory", "200"]
+    ).max_memory == 200 * (1 << 30)
+
+
+def test_cli_rejects_a_nonsense_max_memory(capsys):
+    from pytransrate.cli import build_parser
+
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["-a", "x.fa", "--max-memory", "plenty"])
+    assert "200G" in capsys.readouterr().err

@@ -25,7 +25,7 @@ from pathlib import Path
 from pytransrate.cmd import CommandError, run, which
 from pytransrate.compression import open_binary
 
-__all__ = ["SnapError", "Snap"]
+__all__ = ["SnapError", "Snap", "bam_is_complete"]
 
 logger = logging.getLogger("pytransrate")
 
@@ -434,6 +434,31 @@ def _tail(text: str, lines: int = 40) -> str:
     return "\n".join(kept)
 
 
+#: The 28-byte empty BGZF block that ends every complete BAM (SAM spec 4.1).
+#: A BAM whose last bytes are not this one was still being written when
+#: whatever was writing it stopped.
+_BGZF_EOF = bytes.fromhex("1f8b08040000000000ff0600424302001b0003" + "00" * 9)
+
+
+def bam_is_complete(path) -> bool:
+    """Whether ``path`` is a BAM that was written all the way to the end.
+
+    Resuming a run reuses the BAM it finds, and mapping a real library takes
+    hours, so this is the check that decides between hours saved and metrics
+    computed off half a library.  A BAM left by a killed run is the common
+    case here, not a corner: this module already exists partly because snap
+    gets killed by OOM killers and wall clocks.
+    """
+    try:
+        if os.path.getsize(path) < len(_BGZF_EOF):
+            return False
+        with open(path, "rb") as handle:
+            handle.seek(-len(_BGZF_EOF), os.SEEK_END)
+            return handle.read(len(_BGZF_EOF)) == _BGZF_EOF
+    except OSError:
+        return False
+
+
 class Snap:
     """Builds a snap index and maps paired reads against it.
 
@@ -719,9 +744,28 @@ class Snap:
         self.bam = str(Path(output or f"{lbase}.{rbase}.{index}.bam").resolve())
         self._read_count_file = f"{lbase}-{rbase}-read_count.txt"
 
+        # Logged, both ways, for the same reason the index build is (see
+        # build_index): reuse used to be silent, so a log that jumps straight
+        # into snap's output looked identical whether the BAM was missing,
+        # was unusable, or was reused -- and this is the step that costs
+        # hours on a real library.
         if os.path.exists(self.bam):
-            self._load_read_count(left)
-            return self.bam
+            if bam_is_complete(self.bam):
+                logger.info(
+                    "reusing existing BAM (%.1f GB): %s",
+                    os.path.getsize(self.bam) / 1e9,
+                    self.bam,
+                )
+                self._load_read_count(left)
+                return self.bam
+            logger.warning(
+                "%s stops before the BGZF end-of-file marker, so mapping did "
+                "not finish -- a killed run leaves exactly this. Mapping "
+                "again; snap overwrites it.",
+                self.bam,
+            )
+        else:
+            logger.info("no BAM at %s; mapping", self.bam)
 
         args = self.build_paired_command(
             left, right, threads, self.bam,
@@ -794,6 +838,12 @@ class Snap:
                 self.read_count = int(handle.read().strip() or 0)
             return
 
+        logger.info(
+            "no saved read count at %s; counting the reads in %s instead, "
+            "which reads the whole library",
+            self._read_count_file,
+            reads,
+        )
         for path in str(reads).split(","):
             try:
                 # open_binary, not open: counting the lines of a gzip stream

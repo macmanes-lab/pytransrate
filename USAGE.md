@@ -203,7 +203,8 @@ Give both or neither.
 | option | default | |
 | --- | --- | --- |
 | `-o`, `--output DIR` | `transrate_results` | output directory |
-| `-t`, `--threads N` | 8 | threads for snap and salmon |
+| `-t`, `--threads N` | 8 | threads for snap and salmon, and processes for the read-metrics step |
+| `--max-memory SIZE` | detected | memory the read-metrics step may use — `200G`, `512M`, or a bare number for GB. It caps the processes that step forks, since each holds a full-size copy of the coverage accumulators. The default reads the cgroup, the Slurm allocation and `/proc/meminfo` |
 | `--loglevel LEVEL` | `info` | `error`, `warn`, `info`, `debug`; `debug` logs every external command before it runs |
 | `--keep-bam` | off | keep the alignment BAM instead of deleting it on success. It is large — many gigabytes on a real library |
 | `--no-banner` | off | suppress the startup banner |
@@ -299,8 +300,44 @@ alignments and 99.98% of fragments hitting more than one contig, measured on
 a redundant 27,000-contig assembly. Raising `--multi-edit-distance` costs a
 great deal of time for very little extra signal.
 
-**Threads.** snap and salmon both take `-t`. Memory scales with the index, not
-the thread count.
+**Threads, and the memory they cost.** snap and salmon both take `-t`, and
+for them memory scales with the index, not the thread count. The read-metrics
+step is different: it divides the fragments across processes, and each one
+needs its own copy of the per-base coverage accumulators, at 4 bytes a base:
+
+```
+bytes per process ~= 4 * (n_bases + n_contigs)
+```
+
+A 5.8 Gbp merged assembly is 23 GB per process, so `-t 40` asks for 928 GB —
+and since mapping and quantifying come first, the OOM killer arrives hours
+into the run. pytransrate now works out what is available (cgroup, Slurm
+allocation, `/proc/meminfo`), caps the processes at what fits, and says so:
+
+```
+[ WARN] 40 processes would need 927.7 GB of shared accumulators and only
+        500.0 GB looks available; assigning across 16 instead.
+```
+
+snap and salmon still get every thread; only this step is capped. Little is
+lost — dividing this step is bounded at about 6x however many processes run,
+so it is at its plateau by ~16. Pass `--max-memory 200G` where the detected
+figure is wrong, which is most likely on a scheduler that enforces a limit
+the cgroup does not show.
+
+**Resuming a killed run.** A run that dies after mapping does not repeat it.
+Rerunning the same command with the same `-o` reuses, in order:
+
+- the snap index, if its directory holds `GenomeIndex`;
+- the BAM, if it ends with the BGZF end-of-file marker — a BAM left by a
+  killed snap does not, and is mapped again rather than half-read;
+- `salmon/quant.sf`, if it ends on a complete row and carries one row per
+  contig in the BAM.
+
+Each decision is logged either way, so the log says which hours were skipped
+and which were spent. The BAM is deleted on a *successful* run unless
+`--keep-bam` is given; on a failed one it is left exactly so the next attempt
+can use it.
 
 ## Comparing runs
 
@@ -359,6 +396,14 @@ digits.
 
 **`100 unreadable records in a row`** — that is a truncated or corrupt BAM,
 usually an aligner run that died partway. Delete it and map again.
+
+**Killed, exit 137, right after `assigning fragments and computing read
+metrics`** — the OOM killer. The line above it reports what that step asked
+for: `assigning across 40 processes (927.7 GB of shared accumulators)`.
+Current versions cap the processes at what memory allows instead; if the
+figure they detect is wrong for your scheduler, pass `--max-memory`. Rerun
+the same command with the same `-o` — the index, BAM and `quant.sf` are all
+reused.
 
 **snap dies with SIGFPE** — you have passed the Ruby's multi-alignment
 settings. Use the defaults.
