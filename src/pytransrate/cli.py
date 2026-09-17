@@ -31,7 +31,7 @@ from pytransrate.bam_metrics import MalformedBamError
 from pytransrate.banner import TAGLINE, print_banner
 from pytransrate.cmd import CommandError
 from pytransrate.compression import plain_path, strip_gzip_suffix
-from pytransrate.mapper import Snap
+from pytransrate.mapper import Snap, align_done_path
 from pytransrate.memory import parse_size
 from pytransrate.output import (
     READ_STATS_KEYS,
@@ -420,7 +420,9 @@ def check_arguments(args) -> list[str]:
     return assemblies
 
 
-def analyse_assembly(assembly_path, args, result_dir: Path) -> dict:
+def analyse_assembly(
+    assembly_path, args, result_dir: Path, defer_delete: list | None = None
+) -> dict:
     """Run every requested metric for one assembly."""
     logger.info("loading assembly: %s", assembly_path)
     assembly = Assembly(assembly_path)
@@ -525,8 +527,17 @@ def analyse_assembly(assembly_path, args, result_dir: Path) -> dict:
 
     write_contigs_csv(assembly, str(result_dir / CONTIGS_CSV))
 
+    # DEFERRED_BAM_DELETE: not here. This function is one assembly of
+    # possibly several, and it is followed by the run's own final step --
+    # writing assemblies.csv. Deleting the BAM at the end of *this* assembly
+    # meant a run that died later had already thrown away the hours that
+    # produced it, and a rerun had to map again from nothing. The caller
+    # deletes once the whole run has succeeded.
     if not args.keep_bam and os.path.exists(bam):
-        os.remove(bam)
+        if defer_delete is None:
+            os.remove(bam)
+        else:
+            defer_delete.append(bam)
 
     # Releases the index lock; see INDEX_LOCK in pytransrate.mapper. On the
     # error paths the kernel does it when the process exits, which is the
@@ -567,6 +578,10 @@ def main(argv=None) -> int:
             )
 
         results = []
+        # See DEFERRED_BAM_DELETE. Nothing in here is removed until the run
+        # has produced assemblies.csv; a run that fails keeps every BAM it
+        # made, so the rerun costs minutes.
+        finished_bams: list[str] = []
         for assembly_path in assemblies:
             name = strip_gzip_suffix(assembly_path).stem
             result_dir = output / name if len(assemblies) > 1 else output
@@ -576,7 +591,10 @@ def main(argv=None) -> int:
             os.chdir(result_dir)
             try:
                 results.append(
-                    analyse_assembly(assembly_path, args, result_dir)
+                    analyse_assembly(
+                        assembly_path, args, result_dir,
+                        defer_delete=finished_bams,
+                    )
                 )
             finally:
                 os.chdir(cwd)
@@ -587,6 +605,19 @@ def main(argv=None) -> int:
             str(outfile),
             with_reads=bool(args.left and args.right),
         )
+
+        # The run has succeeded and everything derived from the BAMs is on
+        # disk, so they are now genuinely spare. See DEFERRED_BAM_DELETE.
+        for bam in finished_bams:
+            try:
+                if os.path.exists(bam):
+                    logger.info("run complete; removing BAM %s", bam)
+                    os.remove(bam)
+                marker = align_done_path(bam)
+                if marker.exists():
+                    marker.unlink()
+            except OSError as exc:
+                logger.warning("could not remove %s (%s)", bam, exc)
     except (
         CommandError,
         AssemblyError,

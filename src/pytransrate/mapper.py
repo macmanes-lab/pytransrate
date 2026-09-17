@@ -14,6 +14,7 @@ What is *not* unchanged is the output: see SOFT_CLIPPING below.
 
 from __future__ import annotations
 
+import datetime
 import fcntl
 import logging
 import os
@@ -25,7 +26,8 @@ from pathlib import Path
 from pytransrate.cmd import CommandError, run, which
 from pytransrate.compression import open_binary
 
-__all__ = ["SnapError", "Snap", "bam_is_complete"]
+__all__ = ["SnapError", "Snap", "bam_is_complete", "alignment_is_done",
+           "align_done_path"]
 
 logger = logging.getLogger("pytransrate")
 
@@ -509,6 +511,53 @@ def bam_is_complete(path) -> bool:
         return False
 
 
+# ---------------------------------------------------------------------------
+# ALIGN_DONE
+#
+# Mapping a real library takes hours and the BAM it produces can be hundreds
+# of gigabytes, so every decision about that file is a decision about whether
+# somebody's afternoon survives. Two things used to put it at risk.
+#
+# The first is inference. bam_is_complete reads the BGZF end-of-file marker,
+# which says the file was closed cleanly -- but not which command wrote it,
+# nor whether the reads or the index have changed since. A marker file written
+# only after snap has exited 0 and passed every check in map_reads says that
+# directly, and records the command so a reuse can be matched to the settings
+# that produced it. The EOF check is still made: the marker says the run
+# finished, the marker plus the EOF says the file did too.
+#
+# The second is overwriting. A crashed snap leaves a large partial BAM, and
+# re-mapping used to write straight over it. That file cannot be used for
+# metrics -- half a library gives half the coverage -- but it is the only
+# evidence of what the aligner did before it died, which is exactly what is
+# wanted when the crash is amplab/snap#171 (see SNAP_171). It is now moved
+# aside rather than destroyed. At most one is kept, so the cost is bounded at
+# one extra BAM rather than growing with every retry.
+# ---------------------------------------------------------------------------
+
+#: Written beside the BAM once mapping has finished and been checked.
+ALIGN_DONE_SUFFIX = ".align.done"
+
+#: Where a partial BAM is moved before re-mapping, rather than overwritten.
+PARTIAL_SUFFIX = ".partial"
+
+
+def align_done_path(bam) -> Path:
+    """The completion marker that belongs to ``bam``."""
+    return Path(str(bam) + ALIGN_DONE_SUFFIX)
+
+
+def alignment_is_done(bam) -> bool:
+    """Whether ``bam`` was written by a mapping run that finished.
+
+    Both halves matter: the marker says snap returned and passed its checks,
+    the BGZF end-of-file marker says the file itself was closed. A BAM with
+    neither is a killed run; a BAM with the EOF but no marker predates the
+    marker and is reused on the strength of the EOF alone.
+    """
+    return align_done_path(bam).exists() and bam_is_complete(bam)
+
+
 class Snap:
     """Builds a snap index and maps paired reads against it.
 
@@ -800,20 +849,48 @@ class Snap:
         # was unusable, or was reused -- and this is the step that costs
         # hours on a real library.
         if os.path.exists(self.bam):
-            if bam_is_complete(self.bam):
+            size_gb = os.path.getsize(self.bam) / 1e9
+            if alignment_is_done(self.bam):
                 logger.info(
-                    "reusing existing BAM (%.1f GB): %s",
-                    os.path.getsize(self.bam) / 1e9,
+                    "reusing existing BAM (%.1f GB), %s says mapping finished: %s",
+                    size_gb,
+                    align_done_path(self.bam).name,
                     self.bam,
                 )
                 self._load_read_count(left)
                 return self.bam
-            logger.warning(
-                "%s stops before the BGZF end-of-file marker, so mapping did "
-                "not finish -- a killed run leaves exactly this. Mapping "
-                "again; snap overwrites it.",
-                self.bam,
-            )
+            if bam_is_complete(self.bam):
+                # Predates ALIGN_DONE, or the marker was removed by hand.
+                # The EOF marker is the same evidence the check has always
+                # used, so this stays a reuse rather than hours re-spent.
+                logger.info(
+                    "reusing existing BAM (%.1f GB): it has no %s but ends "
+                    "with the BGZF end-of-file marker, so mapping finished: %s",
+                    size_gb,
+                    ALIGN_DONE_SUFFIX,
+                    self.bam,
+                )
+                self._write_align_done(self.bam, note="marker added on reuse")
+                self._load_read_count(left)
+                return self.bam
+            # See ALIGN_DONE: unusable for metrics, but not ours to destroy.
+            kept = Path(str(self.bam) + PARTIAL_SUFFIX)
+            try:
+                os.replace(self.bam, kept)
+                logger.warning(
+                    "%s (%.1f GB) stops before the BGZF end-of-file marker, "
+                    "so mapping did not finish -- a killed run leaves exactly "
+                    "this. It is NOT being overwritten: moved to %s. Delete "
+                    "it when you no longer need it (rm %s). Mapping again.",
+                    self.bam, size_gb, kept.name, kept,
+                )
+            except OSError as exc:
+                logger.warning(
+                    "%s (%.1f GB) is a partial BAM from a run that did not "
+                    "finish, and it could not be moved aside (%s), so snap "
+                    "will overwrite it. Mapping again.",
+                    self.bam, size_gb, exc,
+                )
         else:
             logger.info("no BAM at %s; mapping", self.bam)
 
@@ -862,7 +939,37 @@ class Snap:
                 f"{' '.join(str(a) for a in args)}\n{_tail(result.output)}"
             )
 
+        # Last thing, deliberately: everything above is a way for a snap that
+        # returned 0 to still have produced nothing usable, and the marker
+        # must mean all of them passed. See ALIGN_DONE.
+        self._write_align_done(self.bam, command=args)
         return self.bam
+
+    def _write_align_done(self, bam, command=None, note=None) -> None:
+        """Record that mapping finished. See ALIGN_DONE.
+
+        Never fatal: the marker is an optimisation for the next run, and a
+        run that mapped successfully must not be failed by a read-only
+        output directory at the very end of it.
+        """
+        try:
+            lines = [
+                f"finished: {datetime.datetime.now().isoformat(timespec='seconds')}",
+                f"bam: {bam}",
+                f"bytes: {os.path.getsize(bam)}",
+                f"fragments: {self.read_count}",
+            ]
+            if command is not None:
+                lines.append("command: " + " ".join(str(a) for a in command))
+            if note is not None:
+                lines.append(f"note: {note}")
+            align_done_path(bam).write_text("\n".join(lines) + "\n")
+        except OSError as exc:
+            logger.warning(
+                "mapping finished but %s could not be written (%s); the next "
+                "run falls back to checking the BAM's end-of-file marker",
+                align_done_path(bam), exc,
+            )
 
     # -- read counting ----------------------------------------------------
 

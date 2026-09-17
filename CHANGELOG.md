@@ -8,6 +8,37 @@ Versions up to and including 1.0.3 are the original Ruby
 [transrate](https://github.com/blahah/transrate). 2.0.0 is a rewrite in
 Python and **does not reproduce their scores** — see *Changed* below.
 
+## [Unreleased]
+
+### Fixed
+
+- **A failed run no longer throws away the BAM that took hours to make.**
+  The BAM was deleted at the end of each assembly's analysis, before the run
+  had written `assemblies.csv` — so a run that died anywhere after that point,
+  or on a later assembly, had already destroyed the work a rerun needed. It is
+  now deleted once the whole run has succeeded, and a run that fails keeps
+  every BAM it made. `--keep-bam` is unchanged.
+
+- **A partial BAM from a killed run is moved aside, not overwritten.** Mapping
+  again used to write straight over it. It cannot be used for metrics — half a
+  library gives half the coverage — but it is the only evidence of what the
+  aligner did before it died, which is exactly what is wanted when the crash is
+  [amplab/snap#171][snap171]. It is renamed to `<bam>.partial` instead, with
+  the path and a removal command logged. At most one is kept, so the cost is
+  bounded at one extra file rather than growing with every retry.
+
+### Added
+
+- **`<bam>.align.done`**, written once snap has exited 0 *and* passed every
+  check that catches a snap which returned success having produced nothing.
+  Reuse previously rested on inferring completion from the BGZF end-of-file
+  marker, which says the file was closed cleanly but not which command wrote
+  it; the marker records the command, the fragment count and the size, so a
+  reused BAM can be matched to the settings that produced it. The end-of-file
+  check still runs — the marker says the run finished, the marker and the EOF
+  together say the file did too. A BAM predating this is reused on the EOF
+  alone and has a marker written for it.
+
 ## [2.2.0] — 2026-09-17
 
 A release about surviving assemblies at real scale. The read-metrics step no

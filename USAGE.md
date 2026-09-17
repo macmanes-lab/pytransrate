@@ -434,6 +434,17 @@ the same option). Rerun the same command with the same `-o` — the index, BAM
 and `quant.sf` are all reused, so a retry costs minutes rather than the hours
 the first attempt spent before it died.
 
+**A run failed — do I have to map again?** No. Rerun the same command with
+the same `-o`: the index, the BAM and `quant.sf` are all reused. The BAM is
+only deleted once a run has succeeded all the way to `assemblies.csv`, so a
+failed run keeps it. A reusable BAM has an `<bam>.align.done` beside it naming
+the command that wrote it.
+
+**`<bam>.partial` in my output directory** — a previous run was killed partway
+through mapping. It is kept rather than overwritten, because it is the evidence
+of what the aligner did before it died, but it cannot be used for metrics and
+nothing will read it. Delete it whenever you like; at most one is kept.
+
 **snap dies with SIGFPE** — this is [amplab/snap#171][snap171], a
 divide-by-zero in snap 2.0.x, and **the defaults do not avoid it**. Upstream
 fixed it in 2.0.6.dev.2; until that reaches a release you need snap built from
