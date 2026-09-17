@@ -557,6 +557,38 @@ def invocation(argv=None) -> str:
     return " ".join(shlex.quote(str(part)) for part in parts)
 
 
+def _report_what_survives(output: Path) -> None:
+    """List the expensive intermediates still on disk after a failure.
+
+    A failed run is the moment somebody needs to know whether the hours are
+    recoverable, and the answer used to have to be worked out by hand from a
+    directory listing. It is also the only way to tell a file pytransrate
+    removed from one something else did: this runs as pytransrate gives up,
+    so anything named here was present at that moment, and anything missing
+    afterwards went between then and the next look.
+    """
+    try:
+        keepers = sorted(output.rglob("*.bam")) + sorted(output.rglob("quant.sf"))
+    except OSError:
+        return
+    if not keepers:
+        logger.error("nothing reusable was written under %s", output)
+        return
+    logger.error(
+        "the run failed, but these are kept and will be reused if you rerun "
+        "the same command with -o %s:", output,
+    )
+    for path in keepers:
+        try:
+            size = path.stat().st_size
+        except OSError:
+            continue
+        done = "" if path.suffix != ".bam" else (
+            " [complete]" if align_done_path(path).exists() else " [partial]"
+        )
+        logger.error("  %-10.1f GB  %s%s", size / 1e9, path, done)
+
+
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging(args.loglevel)
@@ -626,6 +658,7 @@ def main(argv=None) -> int:
         FileExistsError,
     ) as exc:
         logger.error("%s", exc)
+        _report_what_survives(output)
         return 1
 
     return 0

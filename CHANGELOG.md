@@ -29,6 +29,15 @@ Python and **does not reproduce their scores** — see *Changed* below.
 
 ### Added
 
+- **A failed run now lists what it kept.** As pytransrate gives up it names
+  every BAM and `quant.sf` still under the output directory, with sizes, and
+  marks each BAM complete or partial. It turns "do I have to map again?" into
+  something the log answers, and it timestamps the evidence: anything named
+  there was on disk when pytransrate stopped, so a file missing afterwards was
+  removed by something else — a scheduler epilogue, a scratch filesystem, or a
+  wrapper script — and not by this program, which deletes a BAM only after a
+  run has fully succeeded and never touches the salmon directory at all.
+
 - **`<bam>.align.done`**, written once snap has exited 0 *and* passed every
   check that catches a snap which returned success having produced nothing.
   Reuse previously rested on inferring completion from the BGZF end-of-file
