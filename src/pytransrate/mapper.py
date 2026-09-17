@@ -120,6 +120,11 @@ _LOCK_SUFFIX = ".index.lock"
 # 27k redundant contigs with 116k secondary alignments still aligns cleanly
 # here.
 #
+# That diagnosis was half right, and SNAP_171 below has the rest of it: the
+# fault is indeed in the multiple-alignment path, but the flags are not what
+# provokes it, and the defaults below do NOT make a large enough run safe.
+# They remain the right settings on their own merits, measured below.
+#
 # The defaults below are the configuration that runs on that data. Two of
 # them differ from the Ruby:
 #
@@ -208,6 +213,41 @@ _LOCK_SUFFIX = ".index.lock"
 # (scoringCandidatePoolSize = min(mcp, maxBigHits * maxSeeds * 2)).
 #
 # All are overridable; see the --max-seed-hits family in pytransrate.cli.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# SNAP_171
+#
+# snap 2.0.x dies with SIGFPE partway through alignment on large runs, and
+# no setting this port exposes prevents it: amplab/snap#171.
+#
+# A read reaches computeGlobalScore with patternLen == 0, so numVec == 0
+# (AffineGapVectorized.cpp:186) and line 351 divides by it. Upstream traced
+# the zero in July 2025: when the writer fills its output buffer partway
+# through writing a read's alignments it flushes, takes a fresh buffer and
+# retries the write, and the back-clipping from a secondary alignment was
+# wrongly retained across the retry. A read whose secondary alignment clipped
+# it to exactly half its length is then clipped to nothing on the retry.
+# Any other length gave a silently wrong alignment instead of a crash.
+#
+# So the trigger is secondary alignments (-om/-omax) plus a buffer refill at
+# the wrong instant, which makes it a function of OUTPUT VOLUME, not of
+# assembly size -- it merely looks like a large-assembly bug because that is
+# what produces a large BAM. On a ~160 GB BAM the writer refills more or less
+# continuously and a per-read-rare coincidence becomes a certainty: measured
+# on a 5,354,958-contig, 5.66 Gbp merged assembly, snap dies ~17 minutes in
+# with the BAM past 100 GB, on every attempt. The same flags on smaller
+# assemblies run clean, which is why no test here catches it.
+#
+# Tuning does not help. The original report used -H 300000 -D 5 -om 5; this
+# port uses -H 4000 -D 2 -om 2 and still dies. Only dropping -om/-omax
+# entirely avoids it, by removing the secondary alignments the bug needs --
+# which is not available to us, since those are precisely what
+# pytransrate.assign consumes.
+#
+# Fixed upstream in commit 0e0997b, released as 2.0.6.dev.2 on snap's dev
+# branch. It is not in master and not in the bioconda 2.0.5 package, so a
+# large assembly needs a dev build. _how_it_died says so on SIGFPE.
 # ---------------------------------------------------------------------------
 
 #: snap's -H, max hits for the intersecting aligner. snap's own default.
@@ -404,10 +444,20 @@ def _how_it_died(returncode: int) -> str:
     except ValueError:
         name = "unrecognised signal"
     note = ""
-    if -returncode in (signal.SIGFPE, signal.SIGSEGV, signal.SIGBUS, signal.SIGILL):
-        # See MULTI_ALIGNMENT_SETTINGS: snap 2.0.5 is known to crash rather
-        # than complain on large, redundant assemblies, and it is the
-        # multiple-alignment flags that provoke it.
+    if -returncode == signal.SIGFPE:
+        # SNAP_171. Not "usually" this: snap 2.0.x has exactly one known
+        # divide-by-zero, and nothing this port exposes avoids it, so
+        # sending the user round a tuning loop wastes hours of their time.
+        note = (
+            " -- this is amplab/snap#171 until proved otherwise: a "
+            "divide-by-zero in snap 2.0.x reached when the writer refills "
+            "its output buffer mid-read, so it tracks the size of the BAM "
+            "rather than the size of the assembly. No pytransrate setting "
+            "avoids it, and lowering the multi-alignment flags does not "
+            "either. Fixed upstream in 2.0.6.dev.2, which must be built "
+            "from snap's dev branch. See SNAP_171 in mapper.py"
+        )
+    elif -returncode in (signal.SIGSEGV, signal.SIGBUS, signal.SIGILL):
         note = (
             " -- snap crashed rather than reporting an error, so the last "
             "lines of the log are the evidence: they say whether it got as "

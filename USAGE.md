@@ -360,6 +360,12 @@ and which were spent. The BAM is deleted on a *successful* run unless
 `--keep-bam` is given; on a failed one it is left exactly so the next attempt
 can use it.
 
+**Very large assemblies need a patched snap.** Anything producing a BAM in the
+hundreds of gigabytes will hit [amplab/snap#171][snap171] and die with SIGFPE
+partway through alignment, whatever the flags. Build snap from its `dev` branch
+(2.0.6.dev.2 or later) before starting a run of that size; see
+*Troubleshooting* below.
+
 ## Comparing runs
 
 Two scripts, both reading only the CSVs, so they cannot perturb what they
@@ -428,8 +434,27 @@ the same option). Rerun the same command with the same `-o` — the index, BAM
 and `quant.sf` are all reused, so a retry costs minutes rather than the hours
 the first attempt spent before it died.
 
-**snap dies with SIGFPE** — you have passed the Ruby's multi-alignment
-settings. Use the defaults.
+**snap dies with SIGFPE** — this is [amplab/snap#171][snap171], a
+divide-by-zero in snap 2.0.x, and **the defaults do not avoid it**. Upstream
+fixed it in 2.0.6.dev.2; until that reaches a release you need snap built from
+the `dev` branch:
+
+```bash
+git clone -b dev https://github.com/amplab/snap && make -C snap
+```
+
+The bug needs secondary alignments (`-om`/`-omax`) and the writer running out
+of output buffer in the middle of writing a read, so it tracks how big the BAM
+is, not how big the assembly is — it just takes a large assembly to produce a
+large BAM. Past roughly 100 GB of output it stops being unlucky and becomes
+reliable. Lowering `--multi-edit-distance`, `--max-seed-hits` or
+`--max-alignments-per-pair` will not save you; only dropping `-om`/`-omax`
+altogether does, and pytransrate cannot do that because fragment assignment is
+what consumes those secondary alignments. See [the changelog][known] for the
+full account, including one open question about the upstream patch.
+
+[snap171]: https://github.com/amplab/snap/issues/171
+[known]: CHANGELOG.md
 
 **`assemblies.csv would be overwritten`** — give the run its own `-o`.
 

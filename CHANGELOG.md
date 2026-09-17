@@ -100,10 +100,10 @@ Python and **does not reproduce their scores** — see *Changed* below.
   than reproducing snap's whole progress table.
 
   A snap that dies on a signal now says so by name — `killed by signal 8
-  (SIGFPE)` rather than `exit -8` — and says which way to look: a crash
-  points at the multiple-alignment flags (see MULTI_ALIGNMENT_SETTINGS),
-  whereas a SIGKILL or SIGTERM points at the job's memory ceiling or wall
-  clock instead.
+  (SIGFPE)` rather than `exit -8` — and says which way to look: a SIGFPE is
+  almost certainly amplab/snap#171 and is named as such, with the snap
+  version that fixes it, whereas a SIGKILL or SIGTERM points at the job's
+  memory ceiling or wall clock instead. See *Known issues*.
 
 ### Fixed
 
@@ -232,6 +232,70 @@ Python and **does not reproduce their scores** — see *Changed* below.
 - The banner is blue and yellow, replacing the green/yellow/red flanks
   inherited from the Ruby. Colour remains opt-in and off when `NO_COLOR` is
   set, `TERM=dumb`, or stderr is not a terminal.
+
+### Known issues
+
+- **snap-aligner 2.0.5 crashes with SIGFPE on very large runs, and no
+  pytransrate setting avoids it** ([amplab/snap#171][snap171]). This is the
+  bug the `MULTI_ALIGNMENT_SETTINGS` defaults were originally chosen to dodge.
+  They do not dodge it. On a large enough run it is reproducible on every
+  attempt, and the fix has to come from snap.
+
+  The crash is a division by zero in `AffineGapVectorized.cpp`: a read reaches
+  the global-alignment scorer with `patternLen == 0`, which makes `numVec == 0`
+  at line 186 and divides by it at line 351. Upstream diagnosed the path in
+  July 2025. When the writer fills its output buffer partway through writing a
+  read's alignments, it flushes, takes a new buffer and retries the write — and
+  the back-clipping from a secondary alignment was wrongly retained across that
+  retry. A read whose secondary alignment clipped it to exactly half its length
+  is then clipped to nothing on the retry, and scoring a zero-length read
+  divides by zero. Clipping to any other length silently produced a wrong
+  alignment instead of crashing.
+
+  So it needs three things at once: secondary alignments (`-om`/`-omax`), one
+  of them back-clipping to exactly half the read, and the writer running out
+  of buffer at that moment. That makes it a function of **output volume, not
+  assembly size** — which is why it looks like a large-assembly bug. A run
+  producing a ~160 GB BAM is refilling the writer's buffer more or less
+  continuously, so a per-read-rare coincidence becomes a certainty. Measured
+  here on a merged assembly of 5,354,958 contigs and 5.66 Gbp: snap dies
+  roughly 17 minutes into alignment with the BAM already past 100 GB, every
+  time. The same flags and the same pipeline on smaller assemblies run clean,
+  which is the trap — it passes every test that fits on a workstation.
+
+  **Tuning around it does not work.** The original report ran the Ruby's
+  `-H 300000 -D 5 -om 5`; pytransrate runs `-H 4000 -D 2 -om 2`, lowered
+  specifically because of an earlier crash of this kind, and it still dies.
+  Only dropping `-om`/`-omax` altogether appears to help, and only because
+  that removes the secondary alignments the bug requires — which is not a
+  fix available here, since those secondary alignments are exactly what
+  fragment assignment consumes.
+
+  **The patch.** Upstream fixed it in commit [`0e0997b`][snapfix], released as
+  **2.0.6.dev.2 on snap's `dev` branch**. It is not in `master` and not in the
+  bioconda 2.0.5 package, so a large assembly needs snap built from `dev`:
+
+  ```bash
+  git clone -b dev https://github.com/amplab/snap && make -C snap
+  ```
+
+  One caveat if you build it. The rewritten loop in
+  `SimpleReadWriter::writePairs` iterates `whichRead` over both mates but
+  subscripts `result[...].clippingForReadAdjustment[0]` for each, where 2.0.5
+  used `[0]` for read 0 and `[1]` for read 1 — so read 1 appears to take read
+  0's front-clipping adjustment. That is [queried upstream][snapq] and
+  unanswered; it is a correctness question about clipping, not about the
+  crash. Until it is settled, treat a `dev` build as the way to get a large
+  assembly through snap at all, and compare its scores against a smaller
+  assembly run on 2.0.5 before trusting them.
+
+  pytransrate reports the crash as clearly as it can from outside — the run
+  dies with `killed by signal 8 (SIGFPE)`, the last lines of `logs/snap.log`
+  and a pointer to this issue — but it cannot work around it.
+
+[snap171]: https://github.com/amplab/snap/issues/171
+[snapfix]: https://github.com/amplab/snap/commit/0e0997b
+[snapq]: https://github.com/amplab/snap/issues/171#issuecomment-5702151490
 
 ## [2.1.0] — 2026-09-09
 

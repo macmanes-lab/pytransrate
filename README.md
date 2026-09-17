@@ -76,6 +76,21 @@ micromamba create -y -p ./env -c conda-forge -c bioconda \
 `conda` and `mamba` work the same way. snap-aligner and salmon must be on
 `PATH` at run time.
 
+**For very large assemblies, build snap from source instead.** Every released
+snap 2.0.x, including the bioconda 2.0.5 above, dies with a SIGFPE partway
+through alignment once the output BAM gets big enough — a divide-by-zero fixed
+upstream in 2.0.6.dev.2 but not yet in a tagged release
+([amplab/snap#171](https://github.com/amplab/snap/issues/171)). No pytransrate
+setting works around it. If your run will produce a BAM in the hundreds of
+gigabytes:
+
+```bash
+git clone -b dev https://github.com/amplab/snap && make -C snap
+```
+
+See [USAGE.md](USAGE.md#troubleshooting) for how to recognise it and
+[CHANGELOG.md](CHANGELOG.md) for the full account.
+
 ## Use
 
 ```bash
