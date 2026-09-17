@@ -8,54 +8,26 @@ Versions up to and including 1.0.3 are the original Ruby
 [transrate](https://github.com/blahah/transrate). 2.0.0 is a rewrite in
 Python and **does not reproduce their scores** — see *Changed* below.
 
-## [Unreleased]
+## [2.2.0] — 2026-09-17
 
-### Fixed
+A release about surviving assemblies at real scale. The read-metrics step no
+longer asks for more memory than the machine has: it caps the processes it
+forks at what will actually fit, and takes `--max-memory`/`--mem` when the
+figure it works out is wrong for your scheduler. Gzipped assemblies and reads
+are read directly, and snap's index survives interruption, reuse and
+concurrent runs.
 
-- **The read-metrics step no longer asks for more memory than the machine
-  has.** It divides the fragments across `--threads` processes, and each one
-  holds its own full-size copy of the per-base coverage accumulators — 4
-  bytes a base. On a 5.8 Gbp merged assembly that is 23 GB per process, so
-  `-t 40` asked for 928 GB and the OOM killer ended the run *after* nine
-  hours of mapping and quantifying:
+**Scores move on two kinds of assembly.** Any whose deflines contain `|` —
+ENA and TSA downloads — which previously either failed outright or ran to
+completion with every read metric silently zero; and any where snap's contig
+padding dropping from 2000 to 1000 changes the index. See *Changed* and
+*Fixed*.
 
-  ```
-  assigning across 40 processes (927.7 GB of shared accumulators)
-  Killed
-  ```
-
-  The budget is now worked out first — from the cgroup, the Slurm
-  allocation and `/proc/meminfo`, or from the new `--max-memory`/`--mem` —
-  and the processes are capped at what fits, with a warning naming both the
-  figure and where it came from:
-
-  ```
-  40 processes would need 927.7 GB of shared accumulators and the Slurm
-  allocation is 773.1 GB; assigning across 25 instead.
-  ``` snap and
-  salmon still use every thread. Little speed is lost: dividing this step is
-  bounded at about 6x however many processes run (see STRIDING in
-  `read_metrics`), which is reached around 16.
-
-  The parent also frees each worker's buffer as soon as it has been summed
-  rather than at the end of the step, so its own copy is taken while two
-  buffers are held instead of `--threads` plus one.
-
-- **A killed run no longer half-reuses what it left behind.** Resuming
-  already reused the snap index, the BAM and `salmon/quant.sf`, which is
-  what makes a retry cheap — but a process killed mid-write leaves a BAM
-  with no BGZF end-of-file marker and a `quant.sf` missing contigs, and both
-  were reused without a word, giving metrics computed against a fraction of
-  the library. Both are now checked before they are trusted: the BAM for its
-  end-of-file marker, `quant.sf` for a complete final row and one row per
-  contig in the BAM. Anything short is redone.
-
-  Every reuse decision is also logged now, the way the index build has been
-  since it was worth knowing which of them a run skipped. Reusing the BAM
-  silently was the difference between a five-hour step and no step at all,
-  with nothing in the log either way.
+See also *Known issues*: snap 2.0.x cannot finish a run that produces a very
+large BAM, whatever flags it is given, and needs a `dev`-branch build.
 
 ### Added
+
 
 - **Notes on all of this**, since a memory ceiling nobody can see coming is
   the kind of thing that gets rediscovered: `README.md` gains the per-process
@@ -105,7 +77,89 @@ Python and **does not reproduce their scores** — see *Changed* below.
   version that fixes it, whereas a SIGKILL or SIGTERM points at the job's
   memory ceiling or wall clock instead. See *Known issues*.
 
+### Changed
+
+
+- **snap's contig padding drops from 2000 to 1000**, with `--padding` added to
+  override it. snap pads every contig with Ns so an alignment cannot run off
+  one contig into the next, and counts those Ns as genome: `FASTA.cpp` sizes
+  the genome as `fileSize + (nContigs + 1) * padding`, and the `-locationSize`
+  ceiling of `2**32 - 16` bases applies to that total.
+
+  snap's default of 2000 is sized for genomes, where a few hundred contigs
+  make the padding a rounding error. A transcriptome inverts it: at 1.5M
+  contigs averaging a kilobase, the padding contributes 3 Gbp of Ns on top of
+  ~1.5 Gbp of sequence, so the padding is larger than the assembly and is on
+  its own enough to cross the 4-byte ceiling. Crossing it forces the
+  `-locationSize` sweep up to 5, which pays for a second full index build and
+  then leaves the aligner holding a larger index in memory for the run.
+
+  1000 is the largest reduction that costs nothing on either bound snap
+  documents for this value. The correctness floor is the maximum edit
+  distance, which is 30 — two orders of magnitude clear. The other is a
+  performance note about the padding exceeding the paired-end gap, which is
+  the `-s` maximum of 1000: padding of 1000 sits at that bound rather than
+  above it, so a pair straddling two adjacent contigs is no longer separated
+  by more than the maximum spacing. It cannot be called a proper pair either
+  way — crossing the padding means crossing 1000 Ns, which no alignment
+  within an edit distance of 30 survives — so what changes is snap doing the
+  work to reject it, not the rejection. Pass `--padding` above 1000 + read
+  length if that ever shows up in a profile.
+
+  **This moves scores on any assembly where it changes the index**, since
+  contigs land at different genome locations. An index already built at 2000
+  is still read as-is; the padding is stored in it, and `build_index` reuses
+  a complete index rather than rebuilding it.
+
+- The banner is blue and yellow, replacing the green/yellow/red flanks
+  inherited from the Ruby. Colour remains opt-in and off when `NO_COLOR` is
+  set, `TERM=dumb`, or stderr is not a terminal.
+
 ### Fixed
+
+
+- **The read-metrics step no longer asks for more memory than the machine
+  has.** It divides the fragments across `--threads` processes, and each one
+  holds its own full-size copy of the per-base coverage accumulators — 4
+  bytes a base. On a 5.8 Gbp merged assembly that is 23 GB per process, so
+  `-t 40` asked for 928 GB and the OOM killer ended the run *after* nine
+  hours of mapping and quantifying:
+
+  ```
+  assigning across 40 processes (927.7 GB of shared accumulators)
+  Killed
+  ```
+
+  The budget is now worked out first — from the cgroup, the Slurm
+  allocation and `/proc/meminfo`, or from the new `--max-memory`/`--mem` —
+  and the processes are capped at what fits, with a warning naming both the
+  figure and where it came from:
+
+  ```
+  40 processes would need 927.7 GB of shared accumulators and the Slurm
+  allocation is 773.1 GB; assigning across 25 instead.
+  ``` snap and
+  salmon still use every thread. Little speed is lost: dividing this step is
+  bounded at about 6x however many processes run (see STRIDING in
+  `read_metrics`), which is reached around 16.
+
+  The parent also frees each worker's buffer as soon as it has been summed
+  rather than at the end of the step, so its own copy is taken while two
+  buffers are held instead of `--threads` plus one.
+
+- **A killed run no longer half-reuses what it left behind.** Resuming
+  already reused the snap index, the BAM and `salmon/quant.sf`, which is
+  what makes a retry cheap — but a process killed mid-write leaves a BAM
+  with no BGZF end-of-file marker and a `quant.sf` missing contigs, and both
+  were reused without a word, giving metrics computed against a fraction of
+  the library. Both are now checked before they are trusted: the BAM for its
+  end-of-file marker, `quant.sf` for a complete final row and one row per
+  contig in the BAM. Anything short is redone.
+
+  Every reuse decision is also logged now, the way the index build has been
+  since it was worth knowing which of them a run skipped. Reusing the BAM
+  silently was the difference between a five-hour step and no step at all,
+  with nothing in the log either way.
 
 - **A crashing snap no longer takes its own last words with it.** Writing the
   log as snap ran was only half the problem: the buffering that swallowed the
@@ -196,44 +250,8 @@ Python and **does not reproduce their scores** — see *Changed* below.
   fragments for gzipped reads. It decompresses first. The path only runs when
   `--keep-bam` output is reused without its `*-read_count.txt`.
 
-### Changed
-
-- **snap's contig padding drops from 2000 to 1000**, with `--padding` added to
-  override it. snap pads every contig with Ns so an alignment cannot run off
-  one contig into the next, and counts those Ns as genome: `FASTA.cpp` sizes
-  the genome as `fileSize + (nContigs + 1) * padding`, and the `-locationSize`
-  ceiling of `2**32 - 16` bases applies to that total.
-
-  snap's default of 2000 is sized for genomes, where a few hundred contigs
-  make the padding a rounding error. A transcriptome inverts it: at 1.5M
-  contigs averaging a kilobase, the padding contributes 3 Gbp of Ns on top of
-  ~1.5 Gbp of sequence, so the padding is larger than the assembly and is on
-  its own enough to cross the 4-byte ceiling. Crossing it forces the
-  `-locationSize` sweep up to 5, which pays for a second full index build and
-  then leaves the aligner holding a larger index in memory for the run.
-
-  1000 is the largest reduction that costs nothing on either bound snap
-  documents for this value. The correctness floor is the maximum edit
-  distance, which is 30 — two orders of magnitude clear. The other is a
-  performance note about the padding exceeding the paired-end gap, which is
-  the `-s` maximum of 1000: padding of 1000 sits at that bound rather than
-  above it, so a pair straddling two adjacent contigs is no longer separated
-  by more than the maximum spacing. It cannot be called a proper pair either
-  way — crossing the padding means crossing 1000 Ns, which no alignment
-  within an edit distance of 30 survives — so what changes is snap doing the
-  work to reject it, not the rejection. Pass `--padding` above 1000 + read
-  length if that ever shows up in a profile.
-
-  **This moves scores on any assembly where it changes the index**, since
-  contigs land at different genome locations. An index already built at 2000
-  is still read as-is; the padding is stored in it, and `build_index` reuses
-  a complete index rather than rebuilding it.
-
-- The banner is blue and yellow, replacing the green/yellow/red flanks
-  inherited from the Ruby. Colour remains opt-in and off when `NO_COLOR` is
-  set, `TERM=dumb`, or stderr is not a terminal.
-
 ### Known issues
+
 
 - **snap-aligner 2.0.5 crashes with SIGFPE on very large runs, and no
   pytransrate setting avoids it** ([amplab/snap#171][snap171]). This is the
@@ -515,5 +533,6 @@ end to end, with byte-identical scores:
   and raises, so a script using it gets an error rather than silently
   different output.
 
+[2.2.0]: https://github.com/macmanes-lab/pytransrate/releases/tag/v2.2.0
 [2.1.0]: https://github.com/macmanes-lab/pytransrate/releases/tag/v2.1.0
 [2.0.0]: https://github.com/macmanes-lab/pytransrate/releases/tag/v2.0.0
