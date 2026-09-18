@@ -135,6 +135,24 @@ def test_a_budget_that_fits_changes_nothing():
     assert _memory_capped_workers(40, 1 * GB, budget=1000 * GB) == 40
 
 
+def test_a_budget_that_fits_still_says_which_budget_it_was(caplog):
+    """The fitting case is the one that has to speak up.
+
+    A wrapper that drops --max-memory and one that forwards it produce the
+    same log right up to the OOM kill hours later, so a run that fits has to
+    name the budget it fitted inside -- at INFO, where a cluster log will
+    actually carry it.
+    """
+    from pytransrate.memory import Budget
+
+    with caplog.at_level(logging.INFO, logger="pytransrate"):
+        assert _memory_capped_workers(
+            40, 1 * GB, budget=Budget(1000 * GB, "Slurm allocation")
+        ) == 40
+    assert "Slurm allocation" in caplog.text
+    assert "1000.0 GB" in caplog.text
+
+
 def test_the_reported_failure_is_capped(caplog):
     """40 workers x 23 GB = 928 GB, which is what the OOM killer saw."""
     with caplog.at_level(logging.WARNING, logger="pytransrate"):

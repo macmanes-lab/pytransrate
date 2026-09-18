@@ -8,6 +8,25 @@ Versions up to and including 1.0.3 are the original Ruby
 [transrate](https://github.com/blahah/transrate). 2.0.0 is a rewrite in
 Python and **does not reproduce their scores** — see *Changed* below.
 
+## [Unreleased] — 2.2.2.dev1
+
+Versions between releases are numbered `2.2.2.devN`, bumped on every change
+that is meant to be tested on a cluster. The banner prints `__version__` and
+the first log line prints the absolute path of the binary that produced it,
+so the head of any run's log says exactly which build ran — which is the
+only way to tell a fix that did not work from a fix that was never installed.
+Bump `devN` in `src/pytransrate/__init__.py` and `pyproject.toml` together.
+
+### Changed
+
+- **The memory budget is now logged whether or not it caps anything.** It was
+  only announced when it lowered the worker count, so a run that fitted said
+  nothing about which budget it had fitted inside. A wrapper that never passed
+  `--max-memory` through therefore looked identical to one that did, and the
+  difference only showed up as an OOM kill hours later. The line now names the
+  figure and its source — a Slurm allocation, a cgroup limit, `MemAvailable`,
+  or `--max-memory` — on every parallel run.
+
 ## [2.2.1] — 2026-09-17
 
 A follow-up to 2.2.0, about not destroying the expensive intermediates when a

@@ -228,8 +228,13 @@ def _memory_capped_workers(workers: int, bytes_per_worker: int, budget=None) -> 
     affordable = int(usable // (bytes_per_worker + _WORKER_OVERHEAD_BYTES))
 
     if affordable >= workers:
-        logger.debug(
-            "%d processes need %s, within the %s of %s",
+        # Said at INFO, not debug, because this is the line that answers
+        # "did it know about my --mem?". A run that fits and a run whose
+        # budget came from the whole node's free memory look identical
+        # otherwise -- right up to the OOM kill nine hours later, which is
+        # exactly how a wrapper silently dropping --mem stays invisible.
+        logger.info(
+            "%d processes need %s of shared accumulators, within the %s of %s",
             workers,
             format_bytes(workers * bytes_per_worker),
             budget.source,
