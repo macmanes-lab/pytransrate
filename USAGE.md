@@ -322,6 +322,17 @@ naming the figure it used and where that figure came from:
         thread.
 ```
 
+A run that fits logs the same figures at INFO, so every log shows which
+budget it used, including runs that did not need capping:
+
+```
+[ INFO] 16 processes need 368.0 GB of shared accumulators, within the Slurm
+        allocation of 773.1 GB
+```
+
+If that line names `available memory (MemAvailable)` when the job passed
+`--max-memory`, the wrapper did not pass the flag through.
+
 snap and salmon still get every thread; only this step is capped. Little is
 lost — dividing this step is bounded at about 6x however many processes run,
 so it is at its plateau by ~16.

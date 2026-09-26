@@ -8,14 +8,20 @@ Versions up to and including 1.0.3 are the original Ruby
 [transrate](https://github.com/blahah/transrate). 2.0.0 is a rewrite in
 Python and **does not reproduce their scores** — see *Changed* below.
 
-## [Unreleased] — 2.2.2.dev1
+Versions between releases are numbered after the next patch release with a
+`.devN` suffix (`2.2.2.dev1`, …), bumped on every change that is meant to be
+tested on a cluster. The banner prints `__version__` and the first log line
+prints the absolute path of the binary that produced it, so the head of any
+run's log says exactly which build ran — which is the only way to tell a fix
+that did not work from a fix that was never installed. Bump `devN` in
+`src/pytransrate/__init__.py` and `pyproject.toml` together.
 
-Versions between releases are numbered `2.2.2.devN`, bumped on every change
-that is meant to be tested on a cluster. The banner prints `__version__` and
-the first log line prints the absolute path of the binary that produced it,
-so the head of any run's log says exactly which build ran — which is the
-only way to tell a fix that did not work from a fix that was never installed.
-Bump `devN` in `src/pytransrate/__init__.py` and `pyproject.toml` together.
+## [2.2.2] — 2026-09-26
+
+A logging follow-up to 2.2.1. The read-metrics step now says which memory
+budget it used on every parallel run, not only when that budget reduced the
+number of processes. **Scores are unchanged** — nothing here touches what is
+computed.
 
 ### Changed
 
@@ -607,6 +613,7 @@ end to end, with byte-identical scores:
   and raises, so a script using it gets an error rather than silently
   different output.
 
+[2.2.2]: https://github.com/macmanes-lab/pytransrate/releases/tag/v2.2.2
 [2.2.1]: https://github.com/macmanes-lab/pytransrate/releases/tag/v2.2.1
 [2.2.0]: https://github.com/macmanes-lab/pytransrate/releases/tag/v2.2.0
 [2.1.0]: https://github.com/macmanes-lab/pytransrate/releases/tag/v2.1.0
