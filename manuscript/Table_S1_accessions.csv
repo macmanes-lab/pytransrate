@@ -1,0 +1,130 @@
+assembly_id,source,organism,lineage,assembly_accession,read_run_accession,read_pairs
+orp_DRR030368,Oyster River Protocol,Echinococcus multilocularis,Metazoa: Platyhelminthes,https://doi.org/10.5281/zenodo.1320140,DRR030368,73423906
+orp_DRR031870,Oyster River Protocol,Vigna angularis var. angularis,Viridiplantae,https://doi.org/10.5281/zenodo.1320140,DRR031870,60477789
+orp_DRR036858,Oyster River Protocol,Mus musculus,Metazoa: Mammalia,https://doi.org/10.5281/zenodo.1320140,DRR036858,113170145
+orp_DRR046632,Oyster River Protocol,Oncorhynchus mykiss,Metazoa: Actinopterygii,https://doi.org/10.5281/zenodo.1320140,DRR046632,81755202
+orp_DRR053698,Oyster River Protocol,Cephalotus follicularis,Viridiplantae,https://doi.org/10.5281/zenodo.1320140,DRR053698,125686029
+orp_DRR069093,Oyster River Protocol,Hevea brasiliensis,Viridiplantae,https://doi.org/10.5281/zenodo.1320140,DRR069093,102699360
+orp_DRR082659,Oyster River Protocol,Aeginetia indica,Viridiplantae,https://doi.org/10.5281/zenodo.1320140,DRR082659,69319009
+orp_ERR058009,Oyster River Protocol,Entamoeba histolytica,Amoebozoa,https://doi.org/10.5281/zenodo.1320140,ERR058009,68278102
+orp_ERR1016675,Oyster River Protocol,Heterorhabditis indica,Metazoa: Nematoda,https://doi.org/10.5281/zenodo.1320140,ERR1016675,51265671
+orp_ERR1674585,Oyster River Protocol,Schistosoma mansoni,Metazoa: Platyhelminthes,https://doi.org/10.5281/zenodo.1320140,ERR1674585,19485717
+orp_ERR489297,Oyster River Protocol,Anopheles gambiae,Metazoa: Insecta,https://doi.org/10.5281/zenodo.1320140,ERR489297,205648581
+orp_SRR1789336,Oyster River Protocol,Oryctolagus cuniculus,Metazoa: Mammalia,https://doi.org/10.5281/zenodo.1320140,SRR1789336,30758797
+orp_SRR2016923,Oyster River Protocol,Phyllodoce medipapillata,Metazoa: Annelida,https://doi.org/10.5281/zenodo.1320140,SRR2016923,86331907
+orp_SRR2086412,Oyster River Protocol,Mus musculus,Metazoa: Mammalia,https://doi.org/10.5281/zenodo.1320140,SRR2086412,54054001
+orp_SRR3499127,Oyster River Protocol,Nicotiana tabacum,Viridiplantae,https://doi.org/10.5281/zenodo.1320140,SRR3499127,30064608
+tsa_GAAA,NCBI TSA,Latimeria chalumnae,Metazoa: Chordata,GAAA00000000,SRR401852,105073488
+tsa_GABB,NCBI TSA,Archaeopsylla erinacei,Metazoa: Insecta,GABB00000000,SRR578730,54159060
+tsa_GABC,NCBI TSA,Pan troglodytes,Metazoa: Mammalia,GABC00000000,SRR544868,48950755
+tsa_GABD,NCBI TSA,Pan troglodytes,Metazoa: Mammalia,GABD00000000,SRR544870,43859704
+tsa_GABE,NCBI TSA,Pan troglodytes,Metazoa: Mammalia,GABE00000000,SRR544874,28233932
+tsa_GABF,NCBI TSA,Pan troglodytes,Metazoa: Mammalia,GABF00000000,SRR545055,33282671
+tsa_GABH,NCBI TSA,Musa ABB Group,Viridiplantae,GABH00000000,SRR516083,34277230
+tsa_GABO,NCBI TSA,Camelina sativa,Viridiplantae,GABO00000000,SRR653458,13471065
+tsa_GABT,NCBI TSA,Cocos nucifera,Viridiplantae,GABT00000000,SRR606452,27465703
+tsa_GACB,NCBI TSA,Lotus corniculatus,Viridiplantae,GACB00000000,SRR364671,13246476
+tsa_GACH,NCBI TSA,Chromolaena odorata,Viridiplantae,GACH00000000,SRR567584,33949278
+tsa_GACN,NCBI TSA,Gerbera hybrid cultivar,Viridiplantae,GACN00000000,SRR611397,32780764
+tsa_GADC,NCBI TSA,Plukenetia volubilis,Viridiplantae,GADC00000000,SRR627546,26266668
+tsa_GADD,NCBI TSA,Pyropia haitanensis,Rhodophyta,GADD00000000,SRR623025,25761872
+tsa_GADH,NCBI TSA,Corydalinae sp. KMRSPBM-2012,Metazoa: Insecta,GADH00000000,SRR621403,54899583
+tsa_GADR,NCBI TSA,Drosophila pseudoananassae nigrens,Metazoa: Insecta,GADR00000000,SRR544889,18386421
+tsa_GADU,NCBI TSA,Camelus dromedarius,Metazoa: Mammalia,GADU00000000,SRR527277,42876556
+tsa_GADW,NCBI TSA,Camelus dromedarius,Metazoa: Mammalia,GADW00000000,SRR527279,34991127
+tsa_GAEJ,NCBI TSA,Drosophila pseudoananassae pseudoananassae,Metazoa: Insecta,GAEJ00000000,SRR544888,28608906
+tsa_GAES,NCBI TSA,Camelus bactrianus,Metazoa: Mammalia,GAES00000000,SRR527309,16934726
+tsa_GAET,NCBI TSA,Camelus bactrianus,Metazoa: Mammalia,GAET00000000,SRR527310,17076257
+tsa_GAEU,NCBI TSA,Camelus bactrianus,Metazoa: Mammalia,GAEU00000000,SRR527311,16605132
+tsa_GAEV,NCBI TSA,Camelus bactrianus,Metazoa: Mammalia,GAEV00000000,SRR527312,17565669
+tsa_GAEX,NCBI TSA,Camelus bactrianus,Metazoa: Mammalia,GAEX00000000,SRR527314,15774077
+tsa_GAEY,NCBI TSA,Camelus bactrianus,Metazoa: Mammalia,GAEY00000000,SRR527315,20508404
+tsa_GAEZ,NCBI TSA,Camelus bactrianus,Metazoa: Mammalia,GAEZ00000000,SRR527317,17987014
+tsa_GAFA,NCBI TSA,Camelus bactrianus,Metazoa: Mammalia,GAFA00000000,SRR527316,17987014
+tsa_GAFB,NCBI TSA,Camelina sativa,Viridiplantae,GAFB00000000,SRR571157,10831854
+tsa_GAFS,NCBI TSA,Pontastacus leptodactylus,Metazoa: Crustacea,GAFS00000000,SRR629687,81763487
+tsa_GAFV,NCBI TSA,Termitomyces clypeatus MTCC 5091,Fungi,GAFV00000000,SRR747027,40308213
+tsa_GAFY,NCBI TSA,Pontastacus leptodactylus,Metazoa: Crustacea,GAFY00000000,SRR650486,148056148
+tsa_GAGE,NCBI TSA,Termitomyces clypeatus MTCC 5091,Fungi,GAGE00000000,SRR746797,25329795
+tsa_GAGF,NCBI TSA,Chrysopa pallens,Metazoa: Insecta,GAGF00000000,SRR653211,27165637
+tsa_GAGR,NCBI TSA,Nannochloropsis gaditana,Stramenopiles,GAGR00000000,SRR768655,41396586
+tsa_GAGS,NCBI TSA,Bithynia siamensis goniomphalos,Metazoa: Mollusca,GAGS00000000,SRR768418,24976124
+tsa_GAHK,NCBI TSA,Jatropha curcas,Viridiplantae,GAHK00000000,SRR653198,27556071
+tsa_GAHX,NCBI TSA,Mikrocytos mackini,Eukaryota,GAHX00000000,SRR826503,46058354
+tsa_GAID,NCBI TSA,Oreochromis niloticus,Metazoa: Actinopterygii,GAID00000000,SRR797490,25204773
+tsa_GAIG,NCBI TSA,Arachis hypogaea,Viridiplantae,GAIG00000000,SRR827601,6646768
+tsa_GAIU,NCBI TSA,Alexandrium tamarense,Alveolata,GAIU00000000,SRR516821,33749667
+tsa_GAIW,NCBI TSA,Ganaspis sp. G1,Metazoa: Insecta,GAIW00000000,SRR805628,37031980
+tsa_GAJA,NCBI TSA,Leptopilina boulardi,Metazoa: Insecta,GAJA00000000,SRR559222,32964915
+tsa_GAJC,NCBI TSA,Leptopilina heterotoma,Metazoa: Insecta,GAJC00000000,SRR559224,48592366
+tsa_GAJE,NCBI TSA,Avena sativa,Viridiplantae,GAJE00000000,SRR850241,66981516
+tsa_GAJI,NCBI TSA,Pyrenochaeta lycopersici CRA-PAV_ER 1211,Fungi,GAJI00000000,SRR851824,15873275
+tsa_GAJJ,NCBI TSA,Anoplopoma fimbria,Metazoa: Actinopterygii,GAJJ00000000,SRR851004,48366792
+tsa_GAJS,NCBI TSA,Chilo suppressalis,Metazoa: Insecta,GAJS00000000,SRR651040,13677778
+tsa_GAKE,NCBI TSA,Thlaspi arvense,Viridiplantae,GAKE00000000,SRR802670,187362730
+tsa_GAKG,NCBI TSA,Cotesia vestalis,Metazoa: Insecta,GAKG00000000,SRR770031,31178116
+tsa_GALD,NCBI TSA,Agapanthus praecox subsp. orientalis,Viridiplantae,GALD00000000,SRR850813,26537763
+tsa_GALE,NCBI TSA,Spraguea lophii,Fungi,GALE00000000,SRR916958,16473084
+tsa_GAMN,NCBI TSA,Folsomia candida,Metazoa,GAMN00000000,SRR935329,88385689
+tsa_GAMP,NCBI TSA,Callithrix jacchus,Metazoa: Mammalia,GAMP00000000,SRR867044,28797089
+tsa_GAMQ,NCBI TSA,Callithrix jacchus,Metazoa: Mammalia,GAMQ00000000,SRR866213,30371064
+tsa_GAMR,NCBI TSA,Callithrix jacchus,Metazoa: Mammalia,GAMR00000000,SRR867043,30149908
+tsa_GAMS,NCBI TSA,Callithrix jacchus,Metazoa: Mammalia,GAMS00000000,SRR866209,29313937
+tsa_GAMT,NCBI TSA,Callithrix jacchus,Metazoa: Mammalia,GAMT00000000,SRR866208,31104392
+tsa_GANE,NCBI TSA,Stevia rebaudiana,Viridiplantae,GANE00000000,SRR953329,7012382
+tsa_GANL,NCBI TSA,Latrodectus tredecimguttatus,Metazoa: Arachnida,GANL00000000,SRR954929,27605467
+tsa_GANO,NCBI TSA,Corethrella appendiculata,Metazoa: Insecta,GANO00000000,SRR951913,47156814
+tsa_GAOE,NCBI TSA,Capra hircus,Metazoa: Mammalia,GAOE00000000,SRR747797,37163977
+tsa_GAOT,NCBI TSA,Zantedeschia aethiopica,Viridiplantae,GAOT00000000,SRR868662,91218320
+tsa_GAPP,NCBI TSA,Bemisia tabaci,Metazoa: Insecta,GAPP00000000,SRR835757,13611432
+tsa_GAPQ,NCBI TSA,Bemisia tabaci,Metazoa: Insecta,GAPQ00000000,SRR835756,13391493
+tsa_GAQX,NCBI TSA,Graminella nigrifrons,Metazoa: Insecta,GAQX00000000,SRR857271,12025522
+tsa_GARA,NCBI TSA,Miichthys miiuy,Metazoa: Actinopterygii,GARA00000000,SRR1060332,12880301
+tsa_GARB,NCBI TSA,Athetis lepigone,Metazoa: Insecta,GARB00000000,SRR796573,13044847
+tsa_GARC,NCBI TSA,Athetis lepigone,Metazoa: Insecta,GARC00000000,SRR796576,12987929
+tsa_GARD,NCBI TSA,Athetis lepigone,Metazoa: Insecta,GARD00000000,SRR796575,14506581
+tsa_GARG,NCBI TSA,Athetis lepigone,Metazoa: Insecta,GARG00000000,SRR796574,11327113
+tsa_GARO,NCBI TSA,Echinogammarus veneris,Metazoa: Crustacea,GARO00000000,SRR1050726,42628006
+tsa_GARW,NCBI TSA,Eucyclops serrulatus,Metazoa: Crustacea,GARW00000000,SRR1050725,83634701
+tsa_GAUQ,NCBI TSA,Ophiocoma echinata,Metazoa,GAUQ00000000,SRR1138707,29802194
+tsa_GAUR,NCBI TSA,Lytechinus variegatus,Metazoa,GAUR00000000,SRR1139214,31923236
+tsa_GAUS,NCBI TSA,Asterias forbesi,Metazoa,GAUS00000000,SRR1138708,30844547
+tsa_GAUT,NCBI TSA,Sclerodactyla briareus,Metazoa,GAUT00000000,SRR1139189,32493891
+tsa_GAUU,NCBI TSA,Asterias rubens,Metazoa,GAUU00000000,SRR1139190,33584666
+tsa_GAVC,NCBI TSA,Leptasterias sp. AR-2014,Metazoa,GAVC00000000,SRR1139194,41257296
+tsa_GAVE,NCBI TSA,Echinaster spinulosus,Metazoa,GAVE00000000,SRR1139455,36853037
+tsa_GAVF,NCBI TSA,Echinarachnius parma,Metazoa,GAVF00000000,SRR1139193,41712544
+tsa_GAVI,NCBI TSA,Marthasterias glacialis,Metazoa,GAVI00000000,SRR1139196,38396211
+tsa_GAVJ,NCBI TSA,Asterias amurensis,Metazoa,GAVJ00000000,SRR1139201,46848918
+tsa_GAVK,NCBI TSA,Patiria pectinifera,Metazoa,GAVK00000000,SRR1139200,35327953
+tsa_GAVN,NCBI TSA,Pisaster ochraceus,Metazoa,GAVN00000000,SRR1139197,34948776
+tsa_GAVO,NCBI TSA,Parastichopus californicus,Metazoa,GAVO00000000,SRR1139198,38224262
+tsa_GAVP,NCBI TSA,Henricia sp. AR-2014,Metazoa,GAVP00000000,SRR1139191,38623931
+tsa_GAVQ,NCBI TSA,Luidia clathrata,Metazoa,GAVQ00000000,SRR1139195,33096844
+tsa_GAVR,NCBI TSA,Sphaerechinus granularis,Metazoa,GAVR00000000,SRR1139199,43347434
+tsa_GAVS,NCBI TSA,Apostichopus japonicus,Metazoa,GAVS00000000,SRR1139215,37028137
+tsa_GAVZ,NCBI TSA,Tripterygium wilfordii,Viridiplantae,GAVZ00000000,SRR1171189,33029817
+tsa_GAWF,NCBI TSA,Sipyloidea sipylus,Metazoa: Insecta,GAWF00000000,SRR1172444,47511044
+tsa_GAWH,NCBI TSA,Hydractinia symbiolongicarpus,Metazoa: Cnidaria,GAWH00000000,SRR1174275,466702474
+tsa_GAWI,NCBI TSA,Delia antiqua,Metazoa: Insecta,GAWI00000000,SRR916227,25748614
+tsa_GAXM,NCBI TSA,Mischocyttarus flavitarsis,Metazoa: Insecta,GAXM00000000,SRR807358,14529464
+tsa_GAXN,NCBI TSA,Sceliphron caementarium,Metazoa: Insecta,GAXN00000000,SRR807360,18861014
+tsa_GAXP,NCBI TSA,Sphaeropthalma orestes,Metazoa: Insecta,GAXP00000000,SRR823431,14493142
+tsa_GAXQ,NCBI TSA,Pseudomasaris vespoides,Metazoa: Insecta,GAXQ00000000,SRR823417,16675940
+tsa_GAXR,NCBI TSA,Stigmatomma oregonense,Metazoa: Insecta,GAXR00000000,SRR823418,13648445
+tsa_GAXS,NCBI TSA,Pepsis grossa,Metazoa: Insecta,GAXS00000000,SRR823416,18098742
+tsa_GAXT,NCBI TSA,Crioscolia alcione,Metazoa: Insecta,GAXT00000000,SRR823420,14585832
+tsa_GAXU,NCBI TSA,Capsicum annuum,Viridiplantae,GAXU00000000,SRR1123893,53921012
+tsa_GAZO,NCBI TSA,Oxycomanthus japonicus,Metazoa,GAZO00000000,SRR1138706,23401700
+tsa_GAZP,NCBI TSA,Eucidaris tribuloides,Metazoa,GAZP00000000,SRR1138704,17548074
+tsa_GAZR,NCBI TSA,Stegodyphus mimosarum,Metazoa: Arachnida,GAZR00000000,SRR1015314,39976010
+tsa_GAZU,NCBI TSA,Brachycistis timberlakei,Metazoa: Insecta,GAZU00000000,SRR823432,13463088
+tsa_GAZY,NCBI TSA,Morone chrysops,Metazoa: Actinopterygii,GAZY00000000,SRR1187194,66632235
+tsa_GBAA,NCBI TSA,Morone saxatilis,Metazoa: Actinopterygii,GBAA00000000,SRR1187193,64756635
+tsa_GBDO,NCBI TSA,Kerria lacca,Metazoa: Insecta,GBDO00000000,SRR1104126,25980956
+tsa_GBDP,NCBI TSA,Kerria lacca,Metazoa: Insecta,GBDP00000000,SRR1174805,26224026
+tsa_GBDY,NCBI TSA,Kerria lacca,Metazoa: Insecta,GBDY00000000,SRR1176880,26687609
+tsa_GBEO,NCBI TSA,Anopheles sinensis,Metazoa: Insecta,GBEO00000000,SRR851144,25803182
+tsa_GBEP,NCBI TSA,Brassica juncea,Viridiplantae,GBEP00000000,SRR1265953,134372556
+tsa_GBEQ,NCBI TSA,Brassica juncea,Viridiplantae,GBEQ00000000,SRR1269499,172720474
+tsa_GBFL,NCBI TSA,Vaccinium macrocarpon,Viridiplantae,GBFL00000000,SRR1282422,31800150
